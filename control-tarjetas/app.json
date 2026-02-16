@@ -1,0 +1,47 @@
+{
+  "expo": {
+    "name": "FinTrack",
+    "slug": "control-tarjetas",
+    "scheme": "fintrack",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "light",
+    "newArchEnabled": true,
+    "splash": {
+      "image": "./assets/splash-icon.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#ffffff"
+    },
+    "ios": {
+      "supportsTablet": true
+    },
+    "android": {
+      "package": "com.canalasesores.fintrackmovil",
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#ffffff"
+      },
+      "edgeToEdgeEnabled": true,
+      "predictiveBackGestureEnabled": false
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    },
+    "updates": {
+      "url": "https://u.expo.dev/51c9d702-4f9c-4717-b809-2ebc259bcadc"
+    },
+    "runtimeVersion": {
+      "policy": "appVersion"
+    },
+    "plugins": [
+      "expo-sqlite",
+      "expo-web-browser"
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "51c9d702-4f9c-4717-b809-2ebc259bcadc"
+      }
+    }
+  }
+}
