@@ -1,10 +1,14 @@
-import { View, Text, TextInput, TouchableOpacity, StyleSheet, ScrollView, Alert, ActivityIndicator } from 'react-native';
-import { useState, useEffect } from 'react';
+import { View, Text, TextInput, TouchableOpacity, StyleSheet, ScrollView, Alert, ActivityIndicator, KeyboardAvoidingView, Platform } from 'react-native';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { getDb, deleteCard } from '../database/database';
 import { useTheme } from '../context/ThemeContext';
 import { CARD_TYPES, CardType } from '../utils/cardTypes';
-import { spacing, borderRadius, shadows, typography } from '../theme/designTokens';
+import { spacing, borderRadius, shadows, typography, colors as tokens } from '../theme/designTokens';
 import { Ionicons } from '@expo/vector-icons';
+import { LinearGradient } from 'expo-linear-gradient';
+import { formatNumberInput, parseCurrencyInput } from '../utils/formatters';
+import CustomModal from '../components/CustomModal';
+import CardTypeSelector from '../components/CardTypeSelector';
 
 interface EditCardProps {
     cardId: number;
@@ -25,6 +29,15 @@ export default function EditCard({ cardId, onNavigate, onBack }: EditCardProps) 
     const [expiryDate, setExpiryDate] = useState('');
     const [loading, setLoading] = useState(true);
 
+    // Refs
+    const bankRef = useRef<TextInput>(null);
+    const last4Ref = useRef<TextInput>(null);
+    const expiryRef = useRef<TextInput>(null);
+    const quotaRef = useRef<TextInput>(null);
+    const cutRef = useRef<TextInput>(null);
+    const payRef = useRef<TextInput>(null);
+    const interestRef = useRef<TextInput>(null);
+
     useEffect(() => {
         loadCard();
     }, []);
@@ -38,7 +51,7 @@ export default function EditCard({ cardId, onNavigate, onBack }: EditCardProps) 
                 setName(card.name);
                 setBank(card.bank || '');
                 setCardType((card.card_type as CardType) || 'visa');
-                setCreditLimit(card.credit_limit.toString());
+                setCreditLimit(formatNumberInput(card.credit_limit.toString()));
                 setCutDay(card.cut_day.toString());
                 setPayDay(card.pay_day.toString());
                 setInterestRate(card.interest_rate_ea.toString());
@@ -60,12 +73,41 @@ export default function EditCard({ cardId, onNavigate, onBack }: EditCardProps) 
         // Remove non-numeric characters
         const cleaned = text.replace(/[^0-9]/g, '');
 
+        // Validation: Month <= 12
+        if (cleaned.length >= 2) {
+            const month = parseInt(cleaned.substring(0, 2));
+            if (month > 12 || month === 0) {
+                return;
+            }
+        }
+
         let formatted = cleaned;
         if (cleaned.length > 2) {
             formatted = cleaned.substring(0, 2) + '/' + cleaned.substring(2, 4);
         }
 
         setExpiryDate(formatted);
+        // Auto-advance if full
+        if (formatted.length === 5) {
+            quotaRef.current?.focus();
+        }
+    };
+
+    const handleDayChange = (text: string, setter: (val: string) => void, nextRef?: React.RefObject<TextInput | null>) => {
+        const cleaned = text.replace(/[^0-9]/g, '');
+        if (cleaned) {
+            const num = parseInt(cleaned);
+            if (num > 31) return; // Prevent > 31
+        }
+        setter(cleaned);
+        if (cleaned.length === 2 && nextRef) {
+            nextRef.current?.focus();
+        }
+    };
+
+    const handleCurrencyChange = (text: string) => {
+        const formatted = formatNumberInput(text);
+        setCreditLimit(formatted);
     };
 
     const validateDay = (day: string) => {
@@ -75,29 +117,38 @@ export default function EditCard({ cardId, onNavigate, onBack }: EditCardProps) 
 
     const handleSave = async () => {
         if (!name || !bank || !creditLimit || !cutDay || !payDay || !interestRate) {
-            Alert.alert('Error', 'Por favor completa los campos principales');
+            Alert.alert('Faltan Datos', 'Por favor completa los campos principales');
             return;
         }
 
         if (!validateDay(cutDay) || !validateDay(payDay)) {
-            Alert.alert('Error', 'El día de corte y pago debe ser entre 1 y 31');
+            Alert.alert('Fechas Inválidas', 'El día de corte y pago debe ser entre 1 y 31');
             return;
         }
 
         if (expiryDate.length > 0 && expiryDate.length < 5) {
-            Alert.alert('Error', 'Fecha de vencimiento incompleta (MM/YY)');
+            Alert.alert('Fecha Incompleta', 'La fecha de vencimiento debe tener el formato MM/YY');
             return;
         }
 
         try {
-            const db = getDb();
-            await db.runAsync(
-                `UPDATE cards 
-                 SET name = ?, bank = ?, card_type = ?, credit_limit = ?, cut_day = ?, pay_day = ?, interest_rate_ea = ?, last_four_digits = ?, expiry_date = ?
-                 WHERE id = ?`,
-                [name, bank, cardType, parseFloat(creditLimit), parseInt(cutDay), parseInt(payDay), parseFloat(interestRate), lastFourDigits, expiryDate, cardId]
+            const limitValue = parseCurrencyInput(creditLimit);
+
+            // Use centralized update function with Sync
+            const { updateCard } = await import('../database/database');
+            await updateCard(
+                cardId,
+                name,
+                bank,
+                limitValue,
+                parseInt(cutDay),
+                parseInt(payDay),
+                parseFloat(interestRate),
+                lastFourDigits,
+                expiryDate,
+                cardType
             );
-            Alert.alert('Éxito', 'Tarjeta actualizada');
+            Alert.alert('¡Actualizada!', 'Los datos de tu tarjeta han sido actualizados.');
             onNavigate('CardDetail', { cardId }); // Force navigation state refresh
         } catch (error) {
             console.error(error);
@@ -105,31 +156,60 @@ export default function EditCard({ cardId, onNavigate, onBack }: EditCardProps) 
         }
     };
 
+    // Modal State
+    const [modalVisible, setModalVisible] = useState(false);
+    const [modalConfig, setModalConfig] = useState({
+        title: '',
+        message: '',
+        type: 'info' as 'success' | 'error' | 'info' | 'warning' | 'confirmation',
+        confirmText: 'Aceptar',
+        cancelText: 'Cancelar',
+        onConfirm: () => { }
+    });
+
+    const showModal = (
+        title: string,
+        message: string,
+        type: 'success' | 'error' | 'info' | 'warning' | 'confirmation',
+        onConfirm?: () => void,
+        confirmText: string = 'Aceptar',
+        cancelText: string = 'Cancelar'
+    ) => {
+        setModalConfig({
+            title,
+            message,
+            type,
+            onConfirm: onConfirm || (() => setModalVisible(false)),
+            confirmText,
+            cancelText
+        });
+        setModalVisible(true);
+    };
+
     const handleDelete = () => {
-        Alert.alert(
+        showModal(
             'Eliminar Tarjeta',
             '¿Estás seguro de que quieres eliminar esta tarjeta? Se borrarán TODAS las compras e historial asociados. Esta acción no se puede deshacer.',
-            [
-                { text: 'Cancelar', style: 'cancel' },
-                {
-                    text: 'Eliminar',
-                    style: 'destructive',
-                    onPress: async () => {
-                        try {
-                            setLoading(true);
-                            await deleteCard(cardId);
-                            Alert.alert('Éxito', 'Tarjeta eliminada');
-                            onNavigate('Dashboard'); // Go back to root
-                        } catch (error) {
-                            console.error(error);
-                            Alert.alert('Error', 'No se pudo eliminar la tarjeta');
-                            setLoading(false);
-                        }
-                    }
+            'confirmation',
+            async () => {
+                try {
+                    setModalVisible(false);
+                    setLoading(true);
+                    await deleteCard(cardId);
+                    // showModal('Éxito', 'Tarjeta eliminada', 'success', () => onNavigate('Dashboard')); // Can't easily await this modal
+                    onNavigate('Dashboard');
+                } catch (error) {
+                    console.error(error);
+                    showModal('Error', 'No se pudo eliminar la tarjeta', 'error');
+                    setLoading(false);
                 }
-            ]
+            },
+            'Eliminar',
+            'Cancelar'
         );
     };
+
+
 
     if (loading) {
         return (
@@ -141,7 +221,11 @@ export default function EditCard({ cardId, onNavigate, onBack }: EditCardProps) 
     }
 
     return (
-        <View style={[styles.container, { backgroundColor: colors.background }]}>
+        <KeyboardAvoidingView
+            style={[styles.container, { backgroundColor: colors.background }]}
+            behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+            keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 20}
+        >
             <View style={styles.header}>
                 <TouchableOpacity onPress={onBack} style={[styles.backButton, { backgroundColor: colors.cardBg, borderColor: colors.border }]}>
                     <Ionicons name="arrow-back" size={24} color={colors.text} />
@@ -149,73 +233,61 @@ export default function EditCard({ cardId, onNavigate, onBack }: EditCardProps) 
                 <Text style={[styles.title, { color: colors.text }]}>Editar Tarjeta</Text>
             </View>
 
-            <ScrollView contentContainerStyle={styles.form}>
-                <Text style={[styles.label, { color: colors.textMuted }]}>Nombre de la Tarjeta</Text>
-                <TextInput
-                    style={[styles.input, { backgroundColor: colors.inputBg, color: colors.text, borderColor: colors.border }]}
-                    value={name}
-                    onChangeText={setName}
-                    placeholder="Ej: Visa Oro"
-                    placeholderTextColor={colors.textMuted}
-                />
+            <ScrollView contentContainerStyle={styles.form} showsVerticalScrollIndicator={false}>
 
-                <Text style={[styles.label, { color: colors.textMuted }]}>Banco</Text>
-                <TextInput
-                    style={[styles.input, { backgroundColor: colors.inputBg, color: colors.text, borderColor: colors.border }]}
-                    value={bank}
-                    onChangeText={setBank}
-                    placeholder="Ej: BBVA"
-                    placeholderTextColor={colors.textMuted}
-                />
+                {/* Franchise Selector */}
+                <Text style={[styles.sectionLabel, { color: colors.text }]}>Franquicia</Text>
+                <CardTypeSelector selectedType={cardType} onSelect={setCardType} />
 
-
-                {/* Card Type Selector */}
-                <Text style={[styles.label, { color: colors.textMuted, marginTop: spacing.md }]}>Tipo de Tarjeta</Text>
-                <View style={[styles.cardTypeContainer, { marginBottom: 60 }]}>
-
-                    {CARD_TYPES.map((type) => (
-                        <TouchableOpacity
-                            key={type.value}
-                            style={[
-                                styles.cardTypeButton,
-                                {
-                                    backgroundColor: cardType === type.value ? colors.primary : colors.cardBg,
-                                    borderColor: cardType === type.value ? colors.primary : colors.border,
-                                    width: '48%', // Ensure 2 columns
-                                    paddingVertical: spacing.md,
-                                    alignItems: 'center',
-                                    justifyContent: 'center',
-                                }
-                            ]}
-                            onPress={() => setCardType(type.value)}
-                            activeOpacity={0.7}
-                        >
-                            <Text style={[
-                                styles.cardTypeLabel,
-                                { color: cardType === type.value ? 'white' : colors.text, textAlign: 'center' }
-                            ]}>
-                                {type.label}
-                            </Text>
-                        </TouchableOpacity>
-                    ))}
+                <View style={styles.inputGroup}>
+                    <Text style={[styles.label, { color: colors.textMuted }]}>Nombre de la Tarjeta</Text>
+                    <TextInput
+                        style={[styles.input, { backgroundColor: colors.inputBg, color: colors.text, borderColor: colors.border }]}
+                        value={name}
+                        onChangeText={setName}
+                        placeholder="Ej: Visa Oro"
+                        placeholderTextColor={colors.textMuted}
+                        returnKeyType="next"
+                        onSubmitEditing={() => bankRef.current?.focus()}
+                    />
                 </View>
 
-                <View style={[styles.row, { marginTop: spacing.md }]}>
+                <View style={styles.inputGroup}>
+                    <Text style={[styles.label, { color: colors.textMuted }]}>Banco</Text>
+                    <TextInput
+                        ref={bankRef}
+                        style={[styles.input, { backgroundColor: colors.inputBg, color: colors.text, borderColor: colors.border }]}
+                        value={bank}
+                        onChangeText={setBank}
+                        placeholder="Ej: BBVA"
+                        placeholderTextColor={colors.textMuted}
+                        returnKeyType="next"
+                        onSubmitEditing={() => last4Ref.current?.focus()}
+                    />
+                </View>
+
+                <View style={styles.row}>
                     <View style={styles.halfInput}>
                         <Text style={[styles.label, { color: colors.textMuted }]}>Últimos 4 Dígitos</Text>
                         <TextInput
+                            ref={last4Ref}
                             style={[styles.input, { backgroundColor: colors.inputBg, color: colors.text, borderColor: colors.border, textAlign: 'center' }]}
                             value={lastFourDigits}
-                            onChangeText={setLastFourDigits}
+                            onChangeText={(text) => {
+                                setLastFourDigits(text);
+                                if (text.length === 4) expiryRef.current?.focus();
+                            }}
                             keyboardType="numeric"
                             maxLength={4}
                             placeholder="1234"
                             placeholderTextColor={colors.textMuted}
+                            returnKeyType="next"
                         />
                     </View>
                     <View style={styles.halfInput}>
                         <Text style={[styles.label, { color: colors.textMuted }]}>Vencimiento</Text>
                         <TextInput
+                            ref={expiryRef}
                             style={[styles.input, { backgroundColor: colors.inputBg, color: colors.text, borderColor: colors.border, textAlign: 'center' }]}
                             value={expiryDate}
                             onChangeText={handleExpiryDateChange}
@@ -223,59 +295,85 @@ export default function EditCard({ cardId, onNavigate, onBack }: EditCardProps) 
                             placeholder="MM/YY"
                             placeholderTextColor={colors.textMuted}
                             keyboardType="numeric"
+                            returnKeyType="next"
                         />
                     </View>
                 </View>
 
-                <Text style={[styles.label, { color: colors.textMuted }]}>Cupo Total</Text>
-                <TextInput
-                    style={[styles.input, { backgroundColor: colors.inputBg, color: colors.text, borderColor: colors.border }]}
-                    value={creditLimit}
-                    onChangeText={setCreditLimit}
-                    keyboardType="numeric"
-                    placeholder="0"
-                    placeholderTextColor={colors.textMuted}
-                />
+                <View style={styles.inputGroup}>
+                    <Text style={[styles.label, { color: colors.textMuted }]}>Cupo Total</Text>
+                    <TextInput
+                        ref={quotaRef}
+                        style={[styles.input, { backgroundColor: colors.inputBg, color: colors.text, borderColor: colors.border }]}
+                        value={creditLimit}
+                        onChangeText={handleCurrencyChange}
+                        keyboardType="numeric"
+                        placeholder="0"
+                        placeholderTextColor={colors.textMuted}
+                        returnKeyType="next"
+                        onSubmitEditing={() => cutRef.current?.focus()}
+                    />
+                </View>
 
                 <View style={styles.row}>
                     <View style={styles.halfInput}>
                         <Text style={[styles.label, { color: colors.textMuted }]}>Día Corte</Text>
                         <TextInput
+                            ref={cutRef}
                             style={[styles.input, { backgroundColor: colors.inputBg, color: colors.text, borderColor: colors.border, textAlign: 'center' }]}
                             value={cutDay}
-                            onChangeText={setCutDay}
+                            onChangeText={(text) => handleDayChange(text, setCutDay, payRef)}
                             keyboardType="numeric"
                             maxLength={2}
                             placeholder="DD"
                             placeholderTextColor={colors.textMuted}
+                            returnKeyType="next"
                         />
                     </View>
                     <View style={styles.halfInput}>
                         <Text style={[styles.label, { color: colors.textMuted }]}>Día Pago</Text>
                         <TextInput
+                            ref={payRef}
                             style={[styles.input, { backgroundColor: colors.inputBg, color: colors.text, borderColor: colors.border, textAlign: 'center' }]}
                             value={payDay}
-                            onChangeText={setPayDay}
+                            onChangeText={(text) => handleDayChange(text, setPayDay, interestRef)}
                             keyboardType="numeric"
                             maxLength={2}
                             placeholder="DD"
                             placeholderTextColor={colors.textMuted}
+                            returnKeyType="next"
                         />
                     </View>
                 </View>
 
-                <Text style={[styles.label, { color: colors.textMuted }]}>Tasa Efectiva Anual (% E.A.)</Text>
-                <TextInput
-                    style={[styles.input, { backgroundColor: colors.inputBg, color: colors.text, borderColor: colors.border }]}
-                    value={interestRate}
-                    onChangeText={setInterestRate}
-                    keyboardType="numeric"
-                    placeholder="0.00"
-                    placeholderTextColor={colors.textMuted}
-                />
+                <View style={styles.inputGroup}>
+                    <Text style={[styles.label, { color: colors.textMuted }]}>Tasa Efectiva Anual (% E.A.)</Text>
+                    <TextInput
+                        ref={interestRef}
+                        style={[styles.input, { backgroundColor: colors.inputBg, color: colors.text, borderColor: colors.border }]}
+                        value={interestRate}
+                        onChangeText={setInterestRate}
+                        keyboardType="numeric"
+                        placeholder="0.00"
+                        placeholderTextColor={colors.textMuted}
+                        returnKeyType="done"
+                        onSubmitEditing={handleSave}
+                    />
+                </View>
 
-                <TouchableOpacity style={[styles.saveButton, { backgroundColor: colors.primary, shadowColor: colors.primary }]} onPress={handleSave}>
-                    <Text style={styles.saveButtonText}>Guardar Cambios</Text>
+                <TouchableOpacity
+                    style={[styles.saveButton, { backgroundColor: colors.primary, shadowColor: colors.primary }]}
+                    onPress={handleSave}
+                    activeOpacity={0.8}
+                >
+                    <LinearGradient
+                        colors={[colors.primary, tokens.primaryDark]}
+                        style={styles.gradientButton}
+                        start={{ x: 0, y: 0 }}
+                        end={{ x: 1, y: 0 }}
+                    >
+                        <Text style={styles.saveButtonText}>Guardar Cambios</Text>
+                    </LinearGradient>
                 </TouchableOpacity>
 
                 <TouchableOpacity
@@ -285,7 +383,18 @@ export default function EditCard({ cardId, onNavigate, onBack }: EditCardProps) 
                     <Text style={[styles.deleteButtonText, { color: colors.error }]}>Eliminar Tarjeta</Text>
                 </TouchableOpacity>
             </ScrollView>
-        </View>
+
+            <CustomModal
+                visible={modalVisible}
+                title={modalConfig.title}
+                message={modalConfig.message}
+                type={modalConfig.type}
+                onClose={() => setModalVisible(false)}
+                onConfirm={modalConfig.onConfirm}
+                confirmText={modalConfig.confirmText}
+                cancelText={modalConfig.cancelText}
+            />
+        </KeyboardAvoidingView>
     );
 }
 
@@ -298,8 +407,7 @@ const styles = StyleSheet.create({
     header: {
         flexDirection: 'row',
         alignItems: 'center',
-        marginBottom: spacing.lg,
-        // marginTop: spacing.lg,
+        marginBottom: spacing.md,
         paddingVertical: spacing.md
     },
     backButton: {
@@ -312,35 +420,51 @@ const styles = StyleSheet.create({
         ...typography.h2,
     },
     form: {
-        paddingBottom: spacing.xl
+        paddingBottom: spacing.xxl
+    },
+    sectionLabel: {
+        fontWeight: '700',
+        fontSize: 16,
+        marginBottom: spacing.md,
+        marginTop: spacing.sm
+    },
+    inputGroup: {
+        marginBottom: spacing.md
     },
     label: {
         ...typography.label,
         marginBottom: spacing.xs,
-        marginTop: spacing.md
+        fontWeight: '600'
     },
     input: {
+        borderWidth: 1,
         borderRadius: borderRadius.md,
         padding: spacing.md,
         fontSize: 16,
-        marginBottom: spacing.md,
-        borderWidth: 1,
+        height: 50
     },
     row: {
         flexDirection: 'row',
         justifyContent: 'space-between',
-        gap: spacing.md
+        gap: spacing.md,
+        marginBottom: spacing.md
     },
     halfInput: {
         flex: 1
     },
     saveButton: {
-        padding: 18,
         borderRadius: borderRadius.lg,
+        marginTop: spacing.lg,
+        marginBottom: spacing.md,
+        ...shadows.md,
+        overflow: 'hidden'
+    },
+    gradientButton: {
+        paddingVertical: 18,
         alignItems: 'center',
-        marginTop: spacing.xl,
-        marginBottom: spacing.xxl,
-        ...shadows.md
+        justifyContent: 'center',
+        flexDirection: 'row',
+        width: '100%'
     },
     saveButtonText: {
         color: 'white',
@@ -349,36 +473,15 @@ const styles = StyleSheet.create({
         letterSpacing: 1
     },
     deleteButton: {
-        marginTop: spacing.lg,
         padding: 16,
-        borderRadius: borderRadius.lg, // Match saveButton radius
+        borderRadius: borderRadius.lg,
         alignItems: 'center',
         borderWidth: 1,
-        backgroundColor: 'transparent'
+        backgroundColor: 'transparent',
+        marginBottom: spacing.xl
     },
     deleteButtonText: {
         fontSize: 16,
         fontWeight: '700',
-    },
-    cardTypeContainer: {
-        flexDirection: 'row',
-        flexWrap: 'wrap',
-        gap: spacing.sm,
-        marginTop: spacing.sm,
-        marginBottom: spacing.md,
-    },
-    cardTypeButton: {
-        flex: 1,
-        minWidth: '48%',
-        paddingVertical: spacing.md,
-        paddingHorizontal: spacing.md,
-        borderRadius: borderRadius.md,
-        borderWidth: 1,
-        alignItems: 'center',
-        justifyContent: 'center',
-    },
-    cardTypeLabel: {
-        fontSize: 13,
-        fontWeight: '600',
-    },
+    }
 });

@@ -6,7 +6,12 @@ import { getUserProfile, UserProfile } from '../database/userProfile';
 import { deleteAllUserData } from '../database/resetData';
 import { authenticateUser } from '../utils/authenticateUser';
 import { Ionicons } from '@expo/vector-icons';
-import * as Updates from 'expo-updates';
+import Constants from 'expo-constants';
+import { checkForOTAUpdate, fetchAndReloadUpdate } from '../utils/updateUtils';
+import { syncUp } from '../firebase/sync';
+import CreativeLoader from '../components/CreativeLoader';
+import CustomModal from '../components/CustomModal';
+import { signInWithEmailAndPassword } from 'firebase/auth';
 
 interface SettingsProps {
     onNavigate: (screen: string, params?: any) => void;
@@ -16,7 +21,40 @@ interface SettingsProps {
 export default function Settings({ onNavigate, onBack }: SettingsProps) {
     const { colors, theme, toggleTheme } = useTheme();
     const [profile, setProfile] = useState<UserProfile | null>(null);
+    const [isLoading, setIsLoading] = useState(false);
+    const [resetModalVisible, setResetModalVisible] = useState(false);
+    const [passwordModalVisible, setPasswordModalVisible] = useState(false);
+    const [backupModalVisible, setBackupModalVisible] = useState(false);
     const user = auth.currentUser;
+
+    const [modalVisible, setModalVisible] = useState(false);
+    const [modalConfig, setModalConfig] = useState({
+        title: '',
+        message: '',
+        type: 'info' as 'success' | 'error' | 'info' | 'warning' | 'confirmation',
+        confirmText: 'Aceptar',
+        cancelText: 'Cancelar',
+        onConfirm: () => { }
+    });
+
+    const showModal = (
+        title: string,
+        message: string,
+        type: 'success' | 'error' | 'info' | 'warning' | 'confirmation',
+        onConfirm?: () => void,
+        confirmText: string = 'Aceptar',
+        cancelText: string = 'Cancelar'
+    ) => {
+        setModalConfig({
+            title,
+            message,
+            type,
+            onConfirm: onConfirm || (() => setModalVisible(false)),
+            confirmText,
+            cancelText
+        });
+        setModalVisible(true);
+    };
 
     useEffect(() => {
         loadProfile();
@@ -30,74 +68,110 @@ export default function Settings({ onNavigate, onBack }: SettingsProps) {
     };
 
     const handleLogout = () => {
-        Alert.alert(
+        showModal(
             'Cerrar Sesión',
             '¿Estás seguro que deseas salir?',
-            [
-                { text: 'Cancelar', style: 'cancel' },
-                {
-                    text: 'Salir',
-                    style: 'destructive',
-                    onPress: async () => {
-                        await auth.signOut();
-                    }
-                }
-            ]
+            'confirmation',
+            async () => {
+                setModalVisible(false);
+                await auth.signOut();
+            },
+            'Salir',
+            'Cancelar'
         );
     };
 
     const checkForUpdates = async () => {
-        try {
-            const update = await Updates.checkForUpdateAsync();
-            if (update.isAvailable) {
-                Alert.alert(
-                    'Actualización Disponible',
-                    'Hay una nueva versión de la aplicación. ¿Deseas descargarla e instalarla ahora?',
-                    [
-                        { text: 'Cancelar', style: 'cancel' },
-                        {
-                            text: 'Actualizar',
-                            onPress: async () => {
-                                await Updates.fetchUpdateAsync();
-                                await Updates.reloadAsync();
-                            }
-                        }
-                    ]
-                );
-            } else {
-                Alert.alert('Todo al día', 'Ya tienes la última versión instalada.');
-            }
-        } catch (error) {
-            Alert.alert('Error', 'No se pudo verificar actualizaciones: ' + error);
+        setIsLoading(true);
+        const result = await checkForOTAUpdate();
+        setIsLoading(false);
+
+        if (result.status === 'development') {
+            showModal('Modo Desarrollo', 'Las actualizaciones OTA no funcionan en modo desarrollo.', 'info');
+        } else if (result.status === 'uptodate') {
+            showModal('Todo al día', 'Ya tienes la última versión disponible.', 'success');
+        } else if (result.status === 'available') {
+            showModal(
+                'Actualización Disponible',
+                '¿Quieres descargar e instalar la nueva versión? La app se reiniciará.',
+                'confirmation',
+                async () => {
+                    try {
+                        setModalVisible(false);
+                        setIsLoading(true); // Show loader during fetch
+                        await fetchAndReloadUpdate();
+                    } catch (e) {
+                        setIsLoading(false);
+                        showModal('Error', 'Falló la actualización.', 'error');
+                    }
+                },
+                'Actualizar',
+                'Cancelar'
+            );
+        } else {
+            showModal('Error', 'No se pudo verificar la actualización.', 'error');
         }
     };
 
-    const handleResetAllData = async () => {
-        Alert.alert(
-            '⚠️ Reiniciar Aplicación',
-            'Esto eliminará TODOS tus datos: tarjetas, transacciones y perfil. Esta acción NO se puede deshacer.',
-            [
-                { text: 'Cancelar', style: 'cancel' },
-                {
-                    text: 'Eliminar Todo',
-                    style: 'destructive',
-                    onPress: async () => {
-                        const authenticated = await authenticateUser();
-                        if (authenticated && user) {
-                            try {
-                                await deleteAllUserData(user.uid);
-                                Alert.alert('Éxito', 'Todos los datos han sido eliminados');
-                                onBack();
-                            } catch (error) {
-                                Alert.alert('Error', 'No se pudo eliminar los datos');
-                            }
-                        } else {
-                            Alert.alert('Cancelado', 'Autenticación fallida');
-                        }
-                    }
-                }
-            ]
-        );
+    const confirmResetData = async () => {
+        setResetModalVisible(false);
+        const bioSuccess = await authenticateUser();
+
+        if (bioSuccess) {
+            proceedWithReset();
+        } else {
+            // Biometrics failed or cancelled, or not available. Show Password Modal.
+            setTimeout(() => setPasswordModalVisible(true), 500);
+        }
+    };
+
+    const verifyPassword = async (password?: string) => {
+        setPasswordModalVisible(false); // Close first to avoid stacking issues logic
+
+        if (!password) return;
+
+        setIsLoading(true);
+        try {
+            if (user && user.email) {
+                await signInWithEmailAndPassword(auth, user.email, password);
+                // Success
+                proceedWithReset();
+            }
+        } catch (error) {
+            setIsLoading(false);
+            Alert.alert('Error', 'Contraseña incorrecta');
+        }
+    };
+
+    const proceedWithReset = async () => {
+        setIsLoading(true);
+        try {
+            if (user) {
+                await deleteAllUserData(user.uid);
+                await new Promise(resolve => setTimeout(resolve, 1000));
+                setIsLoading(false);
+                Alert.alert('Éxito', 'Todos los datos han sido eliminados.');
+                onBack();
+            }
+        } catch (error: any) {
+            setIsLoading(false);
+            console.error(error);
+            Alert.alert('Error', 'No se pudo eliminar los datos: ' + (error.message || error));
+        }
+    };
+
+    const handleBackup = async () => {
+        if (!user) return;
+
+        setIsLoading(true);
+        try {
+            await syncUp(user.uid);
+            setIsLoading(false);
+            setBackupModalVisible(true);
+        } catch (error) {
+            setIsLoading(false);
+            Alert.alert('Error', 'Falló el respaldo de datos. Verifica tu conexión.');
+        }
     };
 
     const renderAvatar = () => {
@@ -114,16 +188,38 @@ export default function Settings({ onNavigate, onBack }: SettingsProps) {
         }
 
         return (
-            <View style={[styles.avatarPlaceholder, { backgroundColor: colors.primary }]}>
-                <Text style={styles.avatarText}>
-                    {(profile?.display_name || user?.email || 'U')[0].toUpperCase()}
-                </Text>
+            <View style={[styles.avatarPlaceholder, { backgroundColor: colors.cardBg, borderWidth: 1, borderColor: colors.primary }]}>
+                <Ionicons name="person" size={24} color={colors.primary} />
             </View>
         );
     };
 
     return (
         <View style={[styles.container, { backgroundColor: colors.background }]}>
+            <CreativeLoader visible={isLoading} />
+
+            <CustomModal
+                visible={modalVisible}
+                title={modalConfig.title}
+                message={modalConfig.message}
+                type={modalConfig.type}
+                onClose={() => setModalVisible(false)}
+                onConfirm={modalConfig.onConfirm}
+                confirmText={modalConfig.confirmText}
+                cancelText={modalConfig.cancelText}
+            />
+
+            <CustomModal
+                visible={resetModalVisible}
+                type="warning"
+                title="Reiniciar Datos"
+                message="Esto eliminará TODAS tus tarjetas y transacciones. Tu perfil (nombre y foto) se conservará. ¿Estás seguro?"
+                confirmText="Eliminar Todo"
+                cancelText="Cancelar"
+                onClose={() => setResetModalVisible(false)}
+                onConfirm={confirmResetData}
+            />
+
             {/* Header */}
             <View style={styles.header}>
                 <TouchableOpacity onPress={onBack} style={[styles.backButton, { backgroundColor: colors.cardBg, borderColor: colors.border }]}>
@@ -226,7 +322,7 @@ export default function Settings({ onNavigate, onBack }: SettingsProps) {
                             <View style={{ flex: 1 }}>
                                 <Text style={[styles.itemTitle, { color: colors.primary }]}>Buscar Actualizaciones</Text>
                                 <Text style={[styles.itemSubtitle, { color: colors.textMuted }]}>
-                                    Versión {Updates.runtimeVersion ?? '1.0.0'}
+                                    Versión {Constants.expoConfig?.version ?? '1.0.0'}
                                 </Text>
                             </View>
                         </TouchableOpacity>
@@ -250,7 +346,25 @@ export default function Settings({ onNavigate, onBack }: SettingsProps) {
 
                         <TouchableOpacity
                             style={styles.row}
-                            onPress={handleResetAllData}
+                            onPress={handleBackup}
+                            activeOpacity={0.7}
+                        >
+                            <View style={styles.iconContainer}>
+                                <Ionicons name="cloud-upload-outline" size={22} color={colors.success || '#4CAF50'} />
+                            </View>
+                            <View style={{ flex: 1 }}>
+                                <Text style={[styles.itemTitle, { color: colors.success || '#4CAF50' }]}>Respaldar Datos</Text>
+                                <Text style={[styles.itemSubtitle, { color: colors.textMuted }]}>
+                                    Subir datos locales a la nube
+                                </Text>
+                            </View>
+                        </TouchableOpacity>
+
+                        <View style={[styles.divider, { backgroundColor: colors.border }]} />
+
+                        <TouchableOpacity
+                            style={styles.row}
+                            onPress={() => setResetModalVisible(true)}
                             activeOpacity={0.7}
                         >
                             <View style={styles.iconContainer}>
@@ -268,6 +382,28 @@ export default function Settings({ onNavigate, onBack }: SettingsProps) {
 
                 <View style={{ height: 40 }} />
             </ScrollView>
+
+            <CustomModal
+                visible={passwordModalVisible}
+                type="input"
+                title="🔐 Autenticación"
+                message="Ingresa tu contraseña para continuar"
+                confirmText="Verificar"
+                cancelText="Cancelar"
+                showInput={true}
+                inputPlaceholder="Contraseña actual"
+                secureTextEntry={true}
+                onClose={() => setPasswordModalVisible(false)}
+                onConfirm={verifyPassword}
+            />
+
+            <CustomModal
+                visible={backupModalVisible}
+                type="success"
+                title="Respaldo Exitoso"
+                message="Tus datos han sido subidos a la nube correctamente."
+                onClose={() => setBackupModalVisible(false)}
+            />
         </View>
     );
 }

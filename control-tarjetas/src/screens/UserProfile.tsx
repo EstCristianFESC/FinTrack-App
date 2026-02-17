@@ -7,6 +7,8 @@ import { updateProfile } from 'firebase/auth';
 import { getUserProfile, updateUserProfile, createOrUpdateUserProfile } from '../database/userProfile';
 import CustomModal from '../components/CustomModal';
 import { spacing } from '../theme/designTokens';
+import { Ionicons } from '@expo/vector-icons';
+import { LinearGradient } from 'expo-linear-gradient';
 
 interface UserProfileProps {
     onBack: () => void;
@@ -39,24 +41,52 @@ export default function UserProfile({ onBack }: UserProfileProps) {
     }, []);
 
     const pickImage = async () => {
-        // Request permissions
-        const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
-        if (status !== 'granted') {
-            showModal('Permiso denegado', 'Necesitamos permiso para acceder a tus fotos.', 'warning');
-            return;
-        }
-
-        const result = await ImagePicker.launchImageLibraryAsync({
-            mediaTypes: ImagePicker.MediaTypeOptions.Images,
-            allowsEditing: true,
-            aspect: [1, 1],
-            quality: 0.5,
-            base64: true,
-        });
-
-        if (!result.canceled) {
-            setPhotoUrl(result.assets[0].uri);
-        }
+        Alert.alert(
+            'Cambiar Foto',
+            '¿De dónde quieres obtener la foto?',
+            [
+                { text: 'Cancelar', style: 'cancel' },
+                {
+                    text: 'Cámara',
+                    onPress: async () => {
+                        const { status } = await ImagePicker.requestCameraPermissionsAsync();
+                        if (status !== 'granted') {
+                            showModal('Permiso denegado', 'Necesitamos acceso a la cámara.', 'warning');
+                            return;
+                        }
+                        const result = await ImagePicker.launchCameraAsync({
+                            allowsEditing: true,
+                            aspect: [1, 1],
+                            quality: 0.5,
+                            base64: true,
+                        });
+                        if (!result.canceled) {
+                            setPhotoUrl(result.assets[0].uri);
+                        }
+                    }
+                },
+                {
+                    text: 'Galería',
+                    onPress: async () => {
+                        const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
+                        if (status !== 'granted') {
+                            showModal('Permiso denegado', 'Necesitamos permiso para acceder a tus fotos.', 'warning');
+                            return;
+                        }
+                        const result = await ImagePicker.launchImageLibraryAsync({
+                            mediaTypes: ImagePicker.MediaTypeOptions.Images,
+                            allowsEditing: true,
+                            aspect: [1, 1],
+                            quality: 0.5,
+                            base64: true,
+                        });
+                        if (!result.canceled) {
+                            setPhotoUrl(result.assets[0].uri);
+                        }
+                    }
+                }
+            ]
+        );
     };
 
     const loadProfile = async () => {
@@ -86,8 +116,13 @@ export default function UserProfile({ onBack }: UserProfileProps) {
                 display_name: displayName,
                 email: user.email || '',
                 phone: phone,
+                // Note: photo_url from ImagePicker is a local file URI (cache).
+                // It will only work on this device until cache is cleared.
+                // Ideally, upload to Firebase Storage to get a permanent URL.
+                // For now, we save it as is to support local personalization.
                 photo_url: photoUrl || undefined,
             });
+            console.log('✅ Profile saved with photo:', photoUrl);
             showModal('Éxito', 'Perfil actualizado correctamente', 'success', onBack);
         } catch (error) {
             showModal('Error', 'No se pudo actualizar el perfil', 'error');
@@ -112,14 +147,12 @@ export default function UserProfile({ onBack }: UserProfileProps) {
                         {photoUrl ? (
                             <Image source={{ uri: photoUrl }} style={styles.avatarImage} />
                         ) : (
-                            <View style={[styles.avatar, { backgroundColor: colors.primary }]}>
-                                <Text style={styles.avatarText}>
-                                    {(displayName || user?.email || 'U')[0].toUpperCase()}
-                                </Text>
+                            <View style={[styles.avatar, { backgroundColor: colors.cardBg, borderWidth: 2, borderColor: colors.primary }]}>
+                                <Ionicons name="person" size={50} color={colors.primary} />
                             </View>
                         )}
                         <View style={[styles.editBadge, { backgroundColor: colors.accent }]}>
-                            <Text style={styles.editIcon}>📷</Text>
+                            <Ionicons name="pencil" size={16} color="white" />
                         </View>
                     </TouchableOpacity>
                     <Text style={[styles.avatarHint, { color: colors.textMuted }]}>
@@ -244,10 +277,6 @@ const styles = StyleSheet.create({
         alignItems: 'center',
         borderWidth: 2,
         borderColor: 'white',
-    },
-    editIcon: {
-        fontSize: 16,
-        color: 'white',
     },
     avatarText: {
         color: 'white',

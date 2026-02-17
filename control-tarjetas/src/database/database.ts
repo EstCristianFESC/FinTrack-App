@@ -414,18 +414,19 @@ export async function getPeople() {
 
 export async function addPerson(name: string) {
     const db = getDb();
-    await db.runAsync('INSERT INTO people (name) VALUES (?)', [name]);
+    const result = await db.runAsync('INSERT INTO people (name) VALUES (?)', [name]);
+    const newId = result.lastInsertRowId;
 
     // Sync
     if (auth.currentUser) {
-        const result = await db.getAllAsync<{ id: number }>('SELECT last_insert_rowid() as id');
-        const newId = result[0].id;
         savePersonToFirestore(auth.currentUser.uid, {
             id: newId,
             name,
             updated_at: new Date().toISOString()
         });
     }
+
+    return newId;
 }
 
 
@@ -494,6 +495,9 @@ export async function getAvailablePeriods(cardId: number) {
         // Start of THIS period is the Cut Date of (Year, Month)
         const start = getSafeDate(currentYear, currentMonth, card.cut_day);
 
+        // Break if this period starts in the future (relative to maxDate/today)
+        if (start.getTime() > safeMaxTime) break;
+
         // End of THIS period is the Cut Date of (Year, Month + 1)
         // Check for year rollover
         let nextMonthIndex = currentMonth + 1;
@@ -505,13 +509,20 @@ export async function getAvailablePeriods(cardId: number) {
 
         const end = getSafeDate(nextYearIndex, nextMonthIndex, card.cut_day);
 
-        // Label logic: "Feb 2026"
-        const label = end.toLocaleDateString('es-CO', { month: 'long', year: 'numeric' });
+        // Label logic: "16 Ene - 15 Feb"
+        const months = ['Ene', 'Feb', 'Mar', 'Abr', 'May', 'Jun', 'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic'];
+
+        const startDay = start.getDate();
+        const startMonth = months[start.getMonth()];
+        const endDay = end.getDate();
+        const endMonth = months[end.getMonth()];
+
+        const label = `${startDay} ${startMonth} - ${endDay} ${endMonth}`;
 
         // Only add if end date is relevant (>= minDate)
         if (end >= minDate) {
             periods.push({
-                label: label.charAt(0).toUpperCase() + label.slice(1),
+                label: label,
                 value: end.toISOString().slice(0, 7),
                 startDate: start.toISOString(),
                 endDate: end.toISOString(),
@@ -522,10 +533,6 @@ export async function getAvailablePeriods(cardId: number) {
         // Advance
         currentMonth = nextMonthIndex;
         currentYear = nextYearIndex;
-
-        // Break if we are past the max date
-        // We use 'start' > maxDate because current period covers up to 'end'
-        if (start.getTime() > safeMaxTime) break;
     }
 
     // Reverse to show newest first
@@ -534,7 +541,10 @@ export async function getAvailablePeriods(cardId: number) {
 
 export async function getCards() {
     const db = getDb();
-    return await db.getAllAsync('SELECT * FROM cards');
+    const user = auth.currentUser;
+    if (!user) return [];
+
+    return await db.getAllAsync('SELECT * FROM cards WHERE user_id = ?', [user.uid]);
 }
 
 export async function createCard(
@@ -548,15 +558,20 @@ export async function createCard(
     expiryDate: string,
     cardType: string = 'visa'
 ) {
+    const user = auth.currentUser;
+    const userId = user ? user.uid : null;
     const db = getDb();
+
+    if (!userId) throw new Error("Usuario no autenticado");
 
     await db.runAsync(
         `
         INSERT INTO cards
-        (name, bank, credit_limit, cut_day, pay_day, interest_rate_ea, last_four_digits, expiry_date, card_type)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        (user_id, name, bank, credit_limit, cut_day, pay_day, interest_rate_ea, last_four_digits, expiry_date, card_type)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `,
         [
+            userId,
             name,
             bank,
             creditLimit,
@@ -566,7 +581,6 @@ export async function createCard(
             lastFourDigits,
             expiryDate,
             cardType
-
         ]
     );
 
@@ -716,4 +730,163 @@ export async function getPaymentSummaryDetails(cardId: number, cutOffDateIso: st
         byPerson: Object.values(grouped),
         payDate: payDate.toISOString()
     };
+}
+
+// --- Update Functions (with Sync) ---
+
+export async function updateCard(
+    cardId: number,
+    name: string,
+    bank: string,
+    creditLimit: number,
+    cutDay: number,
+    payDay: number,
+    interestRateEA: number,
+    lastFourDigits: string,
+    expiryDate: string,
+    cardType: string
+) {
+    const db = getDb();
+    const user = auth.currentUser;
+
+    await db.runAsync(
+        `UPDATE cards 
+         SET name = ?, bank = ?, credit_limit = ?, cut_day = ?, pay_day = ?, interest_rate_ea = ?, last_four_digits = ?, expiry_date = ?, card_type = ?
+         WHERE id = ?`,
+        [name, bank, creditLimit, cutDay, payDay, interestRateEA, lastFourDigits, expiryDate, cardType, cardId]
+    );
+
+    // Sync
+    if (user) {
+        const updatedCard: FirestoreCard = {
+            id: cardId,
+            name,
+            bank,
+            credit_limit: creditLimit,
+            cut_day: cutDay,
+            pay_day: payDay,
+            interest_rate_ea: interestRateEA,
+            last_four_digits: lastFourDigits,
+            expiry_date: expiryDate,
+            card_type: cardType,
+            updated_at: new Date().toISOString()
+        };
+        saveCardToFirestore(user.uid, updatedCard);
+    }
+}
+
+export async function updatePurchaseWithInstallments(
+    purchaseId: number,
+    cardId: number,
+    personId: number | null,
+    totalAmount: number,
+    totalInstallments: number,
+    notes: string,
+    originalDateIso: string // Keep original date to maintain history entry point
+) {
+    const db = getDb();
+    const user = auth.currentUser;
+
+    // 1. Get Card for Interest Rate and Cut/Pay days
+    const card = await db.getFirstAsync<{
+        interest_rate_ea: number,
+        cut_day: number,
+        pay_day: number
+    }>('SELECT interest_rate_ea, cut_day, pay_day FROM cards WHERE id = ?', [cardId]);
+
+    if (!card) throw new Error('Card not found');
+
+    // 2. Recalculate Installments Logic (Same as createInstallmentPurchase)
+    const eaDecimal = card.interest_rate_ea / 100;
+    const tem = Math.pow(1 + eaDecimal, 1 / 12) - 1;
+
+    let totalWithInterest = 0;
+    let tempBalance = totalAmount;
+    const capitalPerInstallment = totalAmount / totalInstallments;
+
+    for (let i = 0; i < totalInstallments; i++) {
+        const interest = totalInstallments === 1 ? 0 : tempBalance * tem;
+        totalWithInterest += (capitalPerInstallment + interest);
+        tempBalance -= capitalPerInstallment;
+    }
+
+    // 3. Update Purchase Record
+    await db.runAsync(`
+        UPDATE purchases 
+        SET amount = ?, total_with_interest = ?, notes = ?, installments_total = ?, interest_rate_ea = ?, person_id = ?
+        WHERE id = ?
+     `, [totalAmount, totalWithInterest, notes, totalInstallments, card.interest_rate_ea, personId, purchaseId]);
+
+    // 4. Regenerate Installments
+    // Delete old
+    await db.runAsync('DELETE FROM installments WHERE purchase_id = ?', [purchaseId]);
+
+    // Calculate Dates
+    let dateObj = new Date(originalDateIso);
+    let targetCutOffMonth = dateObj.getMonth();
+    let targetCutOffYear = dateObj.getFullYear();
+
+    if (dateObj.getDate() > card.cut_day) {
+        targetCutOffMonth++;
+    }
+
+    const cutOff = getSafeDate(targetCutOffYear, targetCutOffMonth, card.cut_day);
+    let targetPayMonth = cutOff.getMonth();
+    let targetPayYear = cutOff.getFullYear();
+
+    if (card.pay_day < card.cut_day) {
+        targetPayMonth++;
+    }
+
+    const firstPayDate = getSafeDate(targetPayYear, targetPayMonth, card.pay_day);
+    let currentBalance = totalAmount;
+
+    for (let i = 0; i < totalInstallments; i++) {
+        const interestAmount = totalInstallments === 1 ? 0 : currentBalance * tem;
+        const totalInstallmentAmount = capitalPerInstallment + interestAmount;
+
+        const installmentDate = getSafeDate(
+            firstPayDate.getFullYear(),
+            firstPayDate.getMonth() + i,
+            card.pay_day
+        );
+
+        await db.runAsync(
+            `INSERT INTO installments
+            (purchase_id, installment_number, amount, capital, interest, due_date)
+            VALUES (?, ?, ?, ?, ?, ?)`,
+            [purchaseId, i + 1, totalInstallmentAmount, capitalPerInstallment, interestAmount, installmentDate.toISOString()]
+        );
+        currentBalance -= capitalPerInstallment;
+    }
+
+    // 5. Sync to Firestore
+    if (user) {
+        // Sync Purchase
+        const updatedPurchase: FirestorePurchase = {
+            id: purchaseId,
+            card_id: cardId,
+            person_id: personId,
+            amount: totalAmount,
+            total_with_interest: totalWithInterest,
+            date: originalDateIso,
+            notes: notes,
+            is_installments: 1,
+            installments_total: totalInstallments,
+            interest_rate_ea: card.interest_rate_ea,
+            updated_at: new Date().toISOString()
+        };
+        savePurchaseToFirestore(user.uid, updatedPurchase);
+
+        // Sync Installments (Fetch newly created ones)
+        const newInstallments = await db.getAllAsync<FirestoreInstallment>(
+            'SELECT * FROM installments WHERE purchase_id = ?',
+            [purchaseId]
+        );
+        const firestoreInstallments = newInstallments.map(i => ({
+            ...i,
+            updated_at: new Date().toISOString()
+        }));
+        saveInstallmentsBatchToFirestore(user.uid, firestoreInstallments);
+    }
 }

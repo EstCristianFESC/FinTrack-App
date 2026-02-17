@@ -1,4 +1,4 @@
-import { View, Text, FlatList, TouchableOpacity, StyleSheet, RefreshControl } from 'react-native';
+import { View, Text, FlatList, TouchableOpacity, StyleSheet, RefreshControl, ActionSheetIOS, Platform, Image } from 'react-native';
 import { useState, useEffect } from 'react';
 import { getCards, getCardSummary } from '../database/database';
 import CreditCard from '../components/CreditCard';
@@ -10,6 +10,11 @@ import { auth } from '../firebase/firebaseConfig';
 import { formatCurrency } from '../utils/formatters';
 import { getUserProfile } from '../database/userProfile';
 
+import CardPickerModal from '../components/CardPickerModal';
+import SummaryChart from '../components/SummaryChart';
+import SummaryDetailModal from '../components/SummaryDetailModal';
+import { registerForPushNotificationsAsync, schedulePaymentReminders } from '../services/notificationService';
+
 interface DashboardProps {
     onNavigate: (screen: string, params?: any) => void;
     onLogout: () => void;
@@ -20,16 +25,45 @@ export default function Dashboard({ onNavigate, onLogout }: DashboardProps) {
     const [cards, setCards] = useState<any[]>([]);
     const [loading, setLoading] = useState(true);
     const [userName, setUserName] = useState('Usuario');
+    const [userPhoto, setUserPhoto] = useState<string | null>(null);
+    const [cardPickerVisible, setCardPickerVisible] = useState(false);
+
+    // Summary Detail Modal State
+    const [detailModalVisible, setDetailModalVisible] = useState(false);
+    const [modalType, setModalType] = useState<'next_payment' | 'total_debt'>('next_payment');
+
+    useEffect(() => {
+        registerForPushNotificationsAsync();
+        loadData();
+        const interval = setInterval(loadData, 5000);
+        return () => clearInterval(interval);
+    }, []);
+
+    // Helper to schedule reminders based on loaded cards
+    const updateReminders = (cardsData: any[]) => {
+        cardsData.forEach(card => {
+            // Only schedule if there is something to pay and date is valid
+            if ((card.paymentForIssue || 0) > 0 && card.nextCutOffDate) {
+                // Determine target Pay Date
+                // We reuse logic from getCardSummary or just use the nextPayDate if available
+                if (card.nextPayDate) {
+                    schedulePaymentReminders(card.name, new Date(card.nextPayDate), card.id);
+                }
+            }
+        });
+    };
 
     const loadData = async () => {
         try {
             const user = auth.currentUser;
             if (user) {
                 const profile = await getUserProfile(user.uid);
-                if (profile && profile.display_name) {
-                    setUserName(profile.display_name);
+                if (profile) {
+                    if (profile.display_name) setUserName(profile.display_name);
+                    if (profile.photo_url) setUserPhoto(profile.photo_url);
                 } else {
                     setUserName(user.displayName || user.email?.split('@')[0] || 'Usuario');
+                    setUserPhoto(user.photoURL);
                 }
             }
 
@@ -45,6 +79,7 @@ export default function Dashboard({ onNavigate, onLogout }: DashboardProps) {
             );
 
             setCards(enrichedCards);
+            updateReminders(enrichedCards);
         } catch (error) {
             console.error('Error loading dashboard data:', error);
         } finally {
@@ -52,27 +87,8 @@ export default function Dashboard({ onNavigate, onLogout }: DashboardProps) {
         }
     };
 
-    useEffect(() => {
-        loadData();
-        const interval = setInterval(loadData, 5000);
-        return () => clearInterval(interval);
-    }, []);
-
-
     const totalToPay = Math.round(cards.reduce((sum, card) => sum + (card.paymentForIssue || 0), 0));
     const totalDebt = Math.round(cards.reduce((sum, card) => sum + (card.totalDebt || 0), 0));
-
-    // Calculate nearest payment date
-    let nearestPayDate: Date | null = null;
-    const cardsWithPayment = cards.filter(c => (c.paymentForIssue || 0) > 0);
-
-    if (cardsWithPayment.length > 0) {
-        // Find the earliest date
-        nearestPayDate = cardsWithPayment.reduce((minDate, card) => {
-            const cardDate = new Date(card.nextPayDate); // Ensure it's a Date object
-            return !minDate || cardDate < minDate ? cardDate : minDate;
-        }, null as Date | null);
-    }
 
     return (
         <View style={[styles.container, { backgroundColor: colors.background }]}>
@@ -85,10 +101,14 @@ export default function Dashboard({ onNavigate, onLogout }: DashboardProps) {
 
                 <View style={{ flexDirection: 'row', gap: 12 }}>
                     <TouchableOpacity
-                        style={[styles.actionButton, { backgroundColor: colors.cardBg, borderColor: colors.border }]}
+                        style={[styles.actionButton, { backgroundColor: colors.cardBg, borderColor: colors.border, overflow: 'hidden' }]}
                         onPress={() => onNavigate('Settings')}
                     >
-                        <Ionicons name="person-circle-outline" size={24} color={colors.text} />
+                        {userPhoto ? (
+                            <Image source={{ uri: userPhoto }} style={styles.profileImage} />
+                        ) : (
+                            <Ionicons name="person-circle-outline" size={24} color={colors.text} />
+                        )}
                     </TouchableOpacity>
                     <TouchableOpacity
                         style={[styles.actionButton, { backgroundColor: colors.primary, borderColor: colors.primary }]}
@@ -99,39 +119,60 @@ export default function Dashboard({ onNavigate, onLogout }: DashboardProps) {
                 </View>
             </View>
 
-            {/* Summary Block */}
+            {/* Summary Block - Interactive */}
             {cards.length > 0 && (
                 <View style={styles.summaryContainer}>
-                    <LinearGradient
-                        colors={theme === 'dark' ? ['#133154', '#0A2540'] : ['#FFFFFF', '#F3F4F6']}
-                        style={[styles.summaryCard, { borderColor: colors.border }]}
-                    >
-                        <View style={styles.summaryRow}>
-                            <View style={styles.summaryItem}>
-                                <Text style={[styles.summaryLabel, { color: colors.textMuted }]}>PROXIMO PAGO</Text>
-                                <View>
-                                    <Text style={[styles.summaryValue, { color: colors.error }]}>
-                                        {formatCurrency(totalToPay)}
-                                    </Text>
-                                    {nearestPayDate && totalToPay > 0 && (
-                                        <Text style={{ ...typography.small, color: colors.textMuted, marginTop: 4 }}>
-                                            Vence: {nearestPayDate.toLocaleDateString('es-CO', { day: 'numeric', month: 'short' })}
-                                        </Text>
-                                    )}
-                                </View>
-                            </View>
-                            <View style={[styles.summaryDivider, { backgroundColor: colors.border }]} />
-                            <View style={styles.summaryItemRight}>
-                                <Text style={[styles.summaryLabel, { color: colors.textMuted }]}>PAGO TOTAL</Text>
-                                <Text style={[styles.summaryValue, { color: colors.text }]}>
-                                    {formatCurrency(totalDebt)}
-                                </Text>
-                            </View>
-                        </View>
+                    {/* Visual Analytics Chart */}
+                    <SummaryChart cards={cards} />
 
-                    </LinearGradient>
+                    {/* Interactive Totals Row */}
+                    <View style={styles.summaryRow}>
+                        <TouchableOpacity
+                            style={[styles.summaryItemBox, { backgroundColor: colors.cardBg, borderColor: colors.border }]}
+                            onPress={() => {
+                                setModalType('next_payment');
+                                setDetailModalVisible(true);
+                            }}
+                            activeOpacity={0.7}
+                        >
+                            <Text style={[styles.summaryLabel, { color: colors.textMuted }]}>PRÓXIMO PAGO</Text>
+                            <Text style={[styles.summaryValue, { color: colors.error }]}>
+                                {formatCurrency(totalToPay)}
+                            </Text>
+                            <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 4 }}>
+                                <Text style={{ fontSize: 10, color: colors.primary, marginRight: 4 }}>Ver detalle</Text>
+                                <Ionicons name="arrow-forward" size={10} color={colors.primary} />
+                            </View>
+                        </TouchableOpacity>
+
+                        <TouchableOpacity
+                            style={[styles.summaryItemBox, { backgroundColor: colors.cardBg, borderColor: colors.border }]}
+                            onPress={() => {
+                                setModalType('total_debt');
+                                setDetailModalVisible(true);
+                            }}
+                            activeOpacity={0.7}
+                        >
+                            <Text style={[styles.summaryLabel, { color: colors.textMuted }]}>DEUDA GLOBAL</Text>
+                            <Text style={[styles.summaryValue, { color: colors.text }]}>
+                                {formatCurrency(totalDebt)}
+                            </Text>
+                            <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 4 }}>
+                                <Text style={{ fontSize: 10, color: colors.primary, marginRight: 4 }}>Ver detalle</Text>
+                                <Ionicons name="arrow-forward" size={10} color={colors.primary} />
+                            </View>
+                        </TouchableOpacity>
+                    </View>
                 </View>
             )}
+
+            {/* Detail Modal */}
+            <SummaryDetailModal
+                visible={detailModalVisible}
+                onClose={() => setDetailModalVisible(false)}
+                type={modalType}
+                cards={cards}
+            />
 
             {/* Cards List */}
             <FlatList
@@ -161,6 +202,65 @@ export default function Dashboard({ onNavigate, onLogout }: DashboardProps) {
                     </View>
                 }
             />
+
+            {/* Floating Action Button (FAB) */}
+            <TouchableOpacity
+                style={[styles.fab, { backgroundColor: colors.accent, shadowColor: colors.accent }]}
+                onPress={() => {
+                    // 1. If no cards, go directly to AddCard
+                    if (cards.length === 0) {
+                        onNavigate('AddCard');
+                        return;
+                    }
+
+                    // 2. If has cards, initiate selection
+                    if (Platform.OS === 'ios') {
+                        const options = [
+                            'Cancelar',
+                            ...cards.map(c => `${c.name} (${c.bank})`),
+                            'Nueva Tarjeta 💳'
+                        ];
+                        const cancelButtonIndex = 0;
+
+                        ActionSheetIOS.showActionSheetWithOptions(
+                            {
+                                options,
+                                cancelButtonIndex,
+                                title: 'Selecciona una Tarjeta',
+                                message: '¿Con qué tarjeta hiciste el gasto?',
+                                userInterfaceStyle: theme === 'dark' ? 'dark' : 'light'
+                            },
+                            buttonIndex => {
+                                if (buttonIndex === 0) return; // Cancel
+
+                                if (buttonIndex === options.length - 1) {
+                                    onNavigate('AddCard');
+                                } else {
+                                    // Map button index to card (subtract 1 for cancel button)
+                                    const selectedCard = cards[buttonIndex - 1];
+                                    if (selectedCard) {
+                                        onNavigate('AddTransaction', { cardId: selectedCard.id });
+                                    }
+                                }
+                            },
+                        );
+                    } else {
+                        // Android: Show custom modal
+                        setCardPickerVisible(true);
+                    }
+                }}
+                activeOpacity={0.8}
+            >
+                <Ionicons name="wallet" size={30} color="white" />
+            </TouchableOpacity>
+
+            <CardPickerModal
+                visible={cardPickerVisible}
+                cards={cards}
+                onClose={() => setCardPickerVisible(false)}
+                onSelectCard={(cardId) => onNavigate('AddTransaction', { cardId })}
+                onAddNewCard={() => onNavigate('AddCard')}
+            />
         </View>
     );
 }
@@ -174,7 +274,7 @@ const styles = StyleSheet.create({
         flexDirection: 'row',
         justifyContent: 'space-between',
         alignItems: 'center',
-        paddingTop: spacing.lg, // Reduced from spacing.xxl + 10
+        paddingTop: spacing.lg,
         paddingBottom: spacing.lg,
     },
     greeting: {
@@ -196,36 +296,30 @@ const styles = StyleSheet.create({
     summaryContainer: {
         marginBottom: spacing.xl,
     },
-    summaryCard: {
-        borderRadius: borderRadius.lg,
-        padding: spacing.lg,
-        borderWidth: 1,
-        ...shadows.md,
-    },
     summaryRow: {
         flexDirection: 'row',
         justifyContent: 'space-between',
+        marginTop: 10,
+        gap: 12
+    },
+    summaryItemBox: {
+        flex: 1,
+        borderRadius: borderRadius.lg,
+        padding: spacing.md,
+        borderWidth: 1,
+        ...shadows.sm,
         alignItems: 'center',
-    },
-    summaryItem: {
-        flex: 1,
-    },
-    summaryItemRight: {
-        flex: 1,
-        alignItems: 'flex-end',
+        justifyContent: 'center'
     },
     summaryLabel: {
         ...typography.label,
-        marginBottom: spacing.xs,
+        fontSize: 10,
+        marginBottom: 4,
     },
     summaryValue: {
-        ...typography.h2,
-        fontSize: 22,
-    },
-    summaryDivider: {
-        width: 1,
-        height: 40,
-        marginHorizontal: spacing.md,
+        ...typography.h3,
+        fontSize: 18,
+        fontWeight: 'bold'
     },
     sectionTitle: {
         ...typography.h3,
@@ -233,8 +327,8 @@ const styles = StyleSheet.create({
     },
     cardWrapper: {
         marginBottom: spacing.md,
-        ...shadows.md, // Add shadow to the interaction wrapper of the card
-        borderRadius: 16, // Match card radius
+        ...shadows.md,
+        borderRadius: 16,
     },
     list: {
         paddingBottom: spacing.xl,
@@ -251,4 +345,24 @@ const styles = StyleSheet.create({
         ...typography.body,
         textAlign: 'center',
     },
+    fab: {
+        position: 'absolute',
+        bottom: 30,
+        right: 20,
+        width: 60,
+        height: 60,
+        borderRadius: 30,
+        justifyContent: 'center',
+        alignItems: 'center',
+        elevation: 8,
+        shadowOffset: { width: 0, height: 4 },
+        shadowOpacity: 0.3,
+        shadowRadius: 4.65,
+        zIndex: 100,
+    },
+    profileImage: {
+        width: '100%',
+        height: '100%',
+        resizeMode: 'cover'
+    }
 });

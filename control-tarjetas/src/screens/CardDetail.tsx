@@ -7,6 +7,7 @@ import { useTheme } from '../context/ThemeContext';
 import { colors as tokens, spacing, borderRadius, shadows, typography } from '../theme/designTokens';
 import { Ionicons } from '@expo/vector-icons';
 import { formatCurrency } from '../utils/formatters';
+import CustomModal from '../components/CustomModal';
 
 interface CardDetailProps {
     cardId: number;
@@ -100,26 +101,54 @@ export default function CardDetail({ cardId, onBack, onNavigate }: CardDetailPro
         });
     };
 
+    // Modal State
+    const [modalVisible, setModalVisible] = useState(false);
+    const [modalConfig, setModalConfig] = useState({
+        title: '',
+        message: '',
+        type: 'info' as 'success' | 'error' | 'info' | 'warning' | 'confirmation',
+        confirmText: 'Aceptar',
+        cancelText: 'Cancelar',
+        onConfirm: () => { }
+    });
+
+    const showModal = (
+        title: string,
+        message: string,
+        type: 'success' | 'error' | 'info' | 'warning' | 'confirmation',
+        onConfirm?: () => void,
+        confirmText: string = 'Aceptar',
+        cancelText: string = 'Cancelar'
+    ) => {
+        setModalConfig({
+            title,
+            message,
+            type,
+            onConfirm: onConfirm || (() => setModalVisible(false)),
+            confirmText,
+            cancelText
+        });
+        setModalVisible(true);
+    };
+
     const handleRevertPayment = async () => {
-        Alert.alert(
+        showModal(
             'Deshacer Pago',
             '¿Deseas revertir el pago de este corte? Los movimientos volverán a estar pendientes.',
-            [
-                { text: 'Cancelar', style: 'cancel' },
-                {
-                    text: 'Deshacer',
-                    style: 'destructive',
-                    onPress: async () => {
-                        try {
-                            await unmarkPeriodAsPaid(cardId, summary.nextCutOffDate);
-                            Alert.alert('Pago Revertido', 'El estado de cuenta ha sido restaurado.');
-                            loadData();
-                        } catch (e) {
-                            Alert.alert('Error', 'No se pudo revertir el pago');
-                        }
-                    }
+            'confirmation',
+            async () => {
+                try {
+                    await unmarkPeriodAsPaid(cardId, summary.nextCutOffDate);
+                    setModalVisible(false);
+                    // showModal('Pago Revertido', 'El estado de cuenta ha sido restaurado.', 'success'); // Optional, or just reload
+                    loadData();
+                } catch (e) {
+                    setModalVisible(false);
+                    showModal('Error', 'No se pudo revertir el pago', 'error');
                 }
-            ]
+            },
+            'Deshacer',
+            'Cancelar'
         );
     };
 
@@ -285,7 +314,18 @@ export default function CardDetail({ cardId, onBack, onNavigate }: CardDetailPro
                     </View>
                 </TouchableOpacity>
             </Modal>
-        </View>
+
+            <CustomModal
+                visible={modalVisible}
+                title={modalConfig.title}
+                message={modalConfig.message}
+                type={modalConfig.type}
+                onClose={() => setModalVisible(false)}
+                onConfirm={modalConfig.onConfirm}
+                confirmText={modalConfig.confirmText}
+                cancelText={modalConfig.cancelText}
+            />
+        </View >
     );
 }
 

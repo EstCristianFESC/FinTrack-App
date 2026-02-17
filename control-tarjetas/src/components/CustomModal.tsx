@@ -1,6 +1,7 @@
 import React from 'react';
-import { Modal, View, Text, StyleSheet, TouchableOpacity, Dimensions } from 'react-native';
+import { Modal, View, Text, StyleSheet, TouchableOpacity, Dimensions, TextInput } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
+import { Ionicons } from '@expo/vector-icons';
 
 const { width } = Dimensions.get('window');
 
@@ -8,11 +9,14 @@ interface CustomModalProps {
     visible: boolean;
     title: string;
     message: string;
-    type?: 'success' | 'error' | 'info' | 'warning' | 'confirmation';
+    type?: 'success' | 'error' | 'info' | 'warning' | 'confirmation' | 'input';
     onClose: () => void;
-    onConfirm?: () => void; // For confirmation type
+    onConfirm?: (inputValue?: string) => void; // Support returning input value
     confirmText?: string;
     cancelText?: string;
+    showInput?: boolean;
+    inputPlaceholder?: string;
+    secureTextEntry?: boolean;
 }
 
 export default function CustomModal({
@@ -23,8 +27,17 @@ export default function CustomModal({
     onClose,
     onConfirm,
     confirmText = 'Aceptar',
-    cancelText = 'Cancelar'
+    cancelText = 'Cancelar',
+    showInput = false,
+    inputPlaceholder = '',
+    secureTextEntry = false
 }: CustomModalProps) {
+    const [inputValue, setInputValue] = React.useState('');
+
+    // Reset input when visible changes
+    React.useEffect(() => {
+        if (visible) setInputValue('');
+    }, [visible]);
 
     // Colors based on type
     const getColors = () => {
@@ -33,6 +46,7 @@ export default function CustomModal({
             case 'error': return ['#EF4444', '#B91C1C']; // Red
             case 'warning': return ['#F59E0B', '#D97706']; // Amber
             case 'confirmation': return ['#8B5CF6', '#7C3AED']; // Purple
+            case 'input': return ['#3B82F6', '#2563EB']; // Blue for input
             case 'info':
             default: return ['#3B82F6', '#2563EB']; // Blue
         }
@@ -40,13 +54,14 @@ export default function CustomModal({
 
     const gradientColors = getColors();
 
-    const getIcon = () => {
+    const getIconName = (): keyof typeof Ionicons.glyphMap => {
         switch (type) {
-            case 'success': return '✅';
-            case 'error': return '❌';
-            case 'warning': return '⚠️';
-            case 'confirmation': return '❓';
-            case 'info': default: return 'ℹ️';
+            case 'success': return 'checkmark-circle-outline';
+            case 'error': return 'alert-circle-outline';
+            case 'warning': return 'warning-outline';
+            case 'confirmation': return 'help-circle-outline';
+            case 'input': return 'key-outline';
+            case 'info': default: return 'information-circle-outline';
         }
     };
 
@@ -66,18 +81,30 @@ export default function CustomModal({
                         start={{ x: 0, y: 0 }}
                         end={{ x: 1, y: 0 }}
                     >
-                        <Text style={styles.icon}>{getIcon()}</Text>
+                        <Ionicons name={getIconName()} size={40} color="white" style={styles.icon} />
                         <Text style={styles.title}>{title}</Text>
                     </LinearGradient>
 
                     {/* Content */}
                     <View style={styles.content}>
                         <Text style={styles.message}>{message}</Text>
+
+                        {showInput && (
+                            <TextInput
+                                style={styles.input}
+                                placeholder={inputPlaceholder}
+                                value={inputValue}
+                                onChangeText={setInputValue}
+                                secureTextEntry={secureTextEntry}
+                                placeholderTextColor="#9CA3AF"
+                                autoFocus={visible} // Auto focus when opening
+                            />
+                        )}
                     </View>
 
                     {/* Footer / Actions */}
                     <View style={styles.footer}>
-                        {type === 'confirmation' ? (
+                        {(type === 'confirmation' || type === 'input' || type === 'warning') ? (
                             <>
                                 <TouchableOpacity
                                     style={[styles.button, styles.cancelButton]}
@@ -88,8 +115,16 @@ export default function CustomModal({
                                 <TouchableOpacity
                                     style={[styles.button, { backgroundColor: gradientColors[0] }]}
                                     onPress={() => {
-                                        if (onConfirm) onConfirm();
-                                        onClose();
+                                        if (onConfirm) onConfirm(inputValue);
+                                        // Don't close automatically if input is required and empty? 
+                                        // For now, let parent handle validation or close.
+                                        // But usually we want to close. Let's close here.
+                                        // Actually, for password input, we might want to keep it open on error...
+                                        // But this is a generic component. Let's close it and let parent re-open or handle it.
+                                        // Better: close it here.
+                                        // Wait, parent might setVisible(false) manually.
+                                        // If we allow parent to control visibility, we should just call onConfirm.
+                                        // But standard behaviour is close.
                                     }}
                                 >
                                     <Text style={styles.buttonText}>{confirmText}</Text>
@@ -98,7 +133,10 @@ export default function CustomModal({
                         ) : (
                             <TouchableOpacity
                                 style={[styles.button, { backgroundColor: gradientColors[0] }]}
-                                onPress={onClose}
+                                onPress={() => {
+                                    if (onConfirm) onConfirm(inputValue);
+                                    else onClose();
+                                }}
                             >
                                 <Text style={styles.buttonText}>Entendido</Text>
                             </TouchableOpacity>
@@ -136,7 +174,6 @@ const styles = StyleSheet.create({
         justifyContent: 'center'
     },
     icon: {
-        fontSize: 40,
         marginBottom: 10
     },
     title: {
@@ -147,13 +184,25 @@ const styles = StyleSheet.create({
     },
     content: {
         padding: 24,
-        alignItems: 'center'
+        alignItems: 'center',
+        width: '100%'
     },
     message: {
         fontSize: 16,
         color: '#374151',
         textAlign: 'center',
-        lineHeight: 24
+        lineHeight: 24,
+        marginBottom: 10
+    },
+    input: {
+        width: '100%',
+        borderWidth: 1,
+        borderColor: '#D1D5DB',
+        borderRadius: 8,
+        padding: 12,
+        marginTop: 10,
+        fontSize: 16,
+        color: '#1F2937'
     },
     footer: {
         flexDirection: 'row',

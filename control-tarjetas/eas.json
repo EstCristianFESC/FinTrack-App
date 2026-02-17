@@ -13,7 +13,14 @@
             },
             "channel": "preview"
         },
-        "production": {}
+        "production": {
+            "android": {
+                "buildType": "apk"
+            }
+        },
+        "production-apk": {
+            "extends": "production"
+        }
     },
     "submit": {
         "production": {}

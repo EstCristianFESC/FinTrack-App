@@ -9,6 +9,7 @@ export async function initDatabase() {
     await db.execAsync(`
         CREATE TABLE IF NOT EXISTS cards (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT,
             name TEXT NOT NULL,
             bank TEXT,
             credit_limit REAL NOT NULL,
@@ -16,7 +17,8 @@ export async function initDatabase() {
             pay_day INTEGER NOT NULL,
             interest_rate_ea REAL NOT NULL DEFAULT 0,
             last_four_digits TEXT,
-            expiry_date TEXT
+            expiry_date TEXT,
+            card_type TEXT DEFAULT "visa"
         );
     `);
 
@@ -34,6 +36,10 @@ export async function initDatabase() {
         if (!columnNames.includes('card_type')) {
             await db.execAsync('ALTER TABLE cards ADD COLUMN card_type TEXT DEFAULT "visa"');
             console.log('✅ Columna card_type agregada correctamente');
+        }
+        if (!columnNames.includes('user_id')) {
+            await db.execAsync('ALTER TABLE cards ADD COLUMN user_id TEXT');
+            console.log('✅ Columna user_id agregada correctamente');
         }
     } catch (e) {
         console.error('Error en migración de columnas:', e);

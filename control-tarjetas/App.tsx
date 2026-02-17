@@ -9,7 +9,8 @@ import { auth } from './src/firebase/firebaseConfig';
 import { onAuthStateChanged, User } from 'firebase/auth';
 
 import { initDatabase } from './src/database/dbCore';
-import { isLocalDatabaseEmpty, restoreUserData } from './src/firebase/sync';
+import { syncDown } from './src/firebase/sync';
+import { checkAppVersion } from './src/services/VersionCheckService';
 
 import Dashboard from './src/screens/Dashboard';
 import LoginScreen from './src/screens/LoginScreen';
@@ -45,27 +46,36 @@ function AppContent() {
     });
 
     init();
+    checkAppVersion();
     return unsubscribe;
   }, []);
 
   useEffect(() => {
-    const performRestoreIfNeeded = async () => {
+    const performSync = async () => {
       if (user && isDbReady) {
-        const empty = await isLocalDatabaseEmpty();
-        if (empty) {
-          console.log('🔄 Data Restore: Checking cloud backup...');
+        console.log('🔄 validando sincronización para usuario:', user.uid);
+
+        // Audit: Check local cards
+        const db = await import('./src/database/dbCore').then(m => m.getDb());
+        const result = await db.getAllAsync('SELECT * FROM cards');
+        console.log('📊 Cartas locales encontradas:', result.length);
+
+        // Check if we need blocking restore
+        const shouldBlock = await import('./src/firebase/sync').then(m => m.isLocalDatabaseEmpty());
+
+        if (shouldBlock) {
           setIsRestoring(true);
-          await restoreUserData(user.uid);
+          await syncDown(user.uid);
           setIsRestoring(false);
-          // Force refresh by resetting screen logic or just letting React update
-          // ensure Dashboard re-fetches data if it's already mounted?
-          // Dashboard uses useFocusEffect mostly, or useEffect on mount.
-          // If we are on Dashboard, we might need to trigger a reload.
-          setCurrentScreen('Dashboard');
+        } else {
+          // Background sync
+          syncDown(user.uid).then(() => console.log('Background sync done'));
         }
+
+        setCurrentScreen('Dashboard');
       }
     };
-    performRestoreIfNeeded();
+    performSync();
   }, [user, isDbReady]);
 
   async function init() {

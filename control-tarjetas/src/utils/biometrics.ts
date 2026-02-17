@@ -20,18 +20,37 @@ export async function isBiometricEnrolled(): Promise<boolean> {
     }
 }
 
+export async function getBiometricType(): Promise<'FaceID' | 'TouchID' | 'Biometrics' | null> {
+    try {
+        const types = await LocalAuthentication.supportedAuthenticationTypesAsync();
+        if (types.includes(LocalAuthentication.AuthenticationType.FACIAL_RECOGNITION)) {
+            return 'FaceID';
+        }
+        if (types.includes(LocalAuthentication.AuthenticationType.FINGERPRINT)) {
+            return 'TouchID';
+        }
+        return 'Biometrics';
+    } catch (error) {
+        return null;
+    }
+}
+
 export async function authenticateWithBiometrics(): Promise<{ success: boolean; error?: string }> {
     try {
+        const bioType = await getBiometricType();
+        const promptLabel = bioType === 'FaceID' ? 'Usar Face ID' : 'Usar Huella';
+
         const result = await LocalAuthentication.authenticateAsync({
-            promptMessage: 'Autenticarse con huella o Face ID',
+            promptMessage: 'Autenticación Requerida',
             fallbackLabel: 'Usar contraseña',
             cancelLabel: 'Cancelar',
+            disableDeviceFallback: false,
         });
 
         if (result.success) {
             return { success: true };
         } else {
-            return { success: false, error: result.error || 'Autenticación fallida' };
+            return { success: false, error: 'Autenticación fallida' };
         }
     } catch (error) {
         return { success: false, error: 'Error en autenticación biométrica' };

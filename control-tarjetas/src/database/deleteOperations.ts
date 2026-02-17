@@ -13,7 +13,7 @@ export async function deleteTransaction(transactionId: number): Promise<boolean>
 
     try {
         const db = getDb();
-        await db.runAsync('DELETE FROM transactions WHERE id = ?', [transactionId]);
+        await db.runAsync('DELETE FROM purchases WHERE id = ?', [transactionId]);
         return true;
     } catch (error) {
         console.error('Error deleting transaction:', error);
@@ -33,8 +33,9 @@ export async function deleteCard(cardId: number): Promise<boolean> {
     try {
         const db = getDb();
         // Delete related data first
-        await db.runAsync('DELETE FROM transactions WHERE card_id = ?', [cardId]);
-        await db.runAsync('DELETE FROM installments WHERE card_id = ?', [cardId]);
+        // Installments are linked to purchases, not directly to cards
+        await db.runAsync('DELETE FROM installments WHERE purchase_id IN (SELECT id FROM purchases WHERE card_id = ?)', [cardId]);
+        await db.runAsync('DELETE FROM purchases WHERE card_id = ?', [cardId]);
         await db.runAsync('DELETE FROM cards WHERE id = ?', [cardId]);
         return true;
     } catch (error) {

@@ -1,9 +1,11 @@
-import { View, Text, TextInput, TouchableOpacity, StyleSheet, ScrollView, Alert, ActivityIndicator } from 'react-native';
+import { View, Text, TextInput, TouchableOpacity, StyleSheet, ScrollView, Alert, ActivityIndicator, KeyboardAvoidingView, Platform } from 'react-native';
 import { useState, useEffect } from 'react';
-import { getDb, getPeople, addPerson, getSafeDate, deletePurchase } from '../database/database';
+import { getDb, getPeople, addPerson, getSafeDate, deletePurchase, getCardSummary } from '../database/database';
 import { useTheme } from '../context/ThemeContext';
 import { spacing, borderRadius, shadows, typography } from '../theme/designTokens';
 import { Ionicons } from '@expo/vector-icons';
+import CustomModal from '../components/CustomModal';
+import { formatCurrency, formatNumberInput, parseCurrencyInput } from '../utils/formatters';
 
 interface EditTransactionProps {
     transactionId: number;
@@ -25,6 +27,22 @@ export default function EditTransaction({ transactionId, cardId, onBack }: EditT
     const [newPersonName, setNewPersonName] = useState('');
     const [showNewPerson, setShowNewPerson] = useState(false);
 
+    // Balance check
+    const [availableCredit, setAvailableCredit] = useState(0);
+    const [originalAmount, setOriginalAmount] = useState(0);
+
+    // Modal
+    const [modalVisible, setModalVisible] = useState(false);
+    const [modalConfig, setModalConfig] = useState({
+        title: '',
+        message: '',
+        type: 'info' as 'success' | 'error' | 'info' | 'warning' | 'confirmation',
+        confirmText: 'Aceptar',
+        cancelText: 'Cancelar',
+        onConfirm: () => { }
+    });
+
+
     useEffect(() => {
         loadData();
     }, []);
@@ -35,8 +53,13 @@ export default function EditTransaction({ transactionId, cardId, onBack }: EditT
 
         const db = getDb();
         const tx = await db.getFirstAsync<any>('SELECT * FROM purchases WHERE id = ?', [transactionId]);
+
+        const summary = await getCardSummary(cardId);
+        if (summary) setAvailableCredit(summary.availableCredit);
+
         if (tx) {
-            setAmount(tx.amount.toString());
+            setAmount(formatNumberInput(tx.amount.toString()));
+            setOriginalAmount(tx.amount); // Keep reference to calculate delta
             setNotes(tx.notes);
             setInstallments(tx.installments_total.toString());
             setDate(tx.date); // Keep full ISO string if needed for re-calc
@@ -47,118 +70,119 @@ export default function EditTransaction({ transactionId, cardId, onBack }: EditT
 
     const handleAddPerson = async () => {
         if (!newPersonName) return;
-        await addPerson(newPersonName);
-        setNewPersonName('');
-        setShowNewPerson(false);
-        const peopleData = await getPeople();
-        setPeople(peopleData);
+        try {
+            const newId = await addPerson(newPersonName);
+            setNewPersonName('');
+            setShowNewPerson(false);
+
+            const peopleData = await getPeople();
+            setPeople(peopleData);
+            if (newId) {
+                setSelectedPersonId(newId as number);
+            }
+        } catch (e) {
+            console.error(e);
+        }
+    };
+
+    const showModal = (
+        title: string,
+        message: string,
+        type: 'success' | 'error' | 'info' | 'warning' | 'confirmation',
+        onConfirm?: () => void,
+        confirmText: string = 'Aceptar',
+        cancelText: string = 'Cancelar'
+    ) => {
+        setModalConfig({
+            title,
+            message,
+            type,
+            onConfirm: onConfirm || (() => setModalVisible(false)),
+            confirmText,
+            cancelText
+        });
+        setModalVisible(true);
     };
 
     const handleDelete = () => {
-        Alert.alert(
+        showModal(
             'Eliminar Gasto',
             '¿Estás seguro de que quieres eliminar este gasto? Esta acción no se puede deshacer.',
-            [
-                { text: 'Cancelar', style: 'cancel' },
-                {
-                    text: 'Eliminar',
-                    style: 'destructive',
-                    onPress: async () => {
-                        try {
-                            await deletePurchase(transactionId);
-                            Alert.alert('Éxito', 'Gasto eliminado');
-                            onBack();
-                        } catch (error) {
-                            Alert.alert('Error', 'No se pudo eliminar el gasto');
-                        }
-                    }
+            'confirmation',
+            async () => {
+                try {
+                    setModalVisible(false); // Close modal first
+                    await deletePurchase(transactionId);
+                    // Show success? Or just go back.
+                    // A simple toast might be better, or just go back.
+                    // But let's verify.
+                    onBack();
+                } catch (error) {
+                    showModal('Error', 'No se pudo eliminar el gasto', 'error');
                 }
-            ]
+            },
+            'Eliminar',
+            'Cancelar'
         );
     };
 
+    const adjustInstallments = (delta: number) => {
+        let current = parseInt(installments) || 1;
+        current += delta;
+        if (current < 1) current = 1;
+        setInstallments(current.toString());
+    };
+
     const handleSave = async () => {
+        const numericAmount = parseCurrencyInput(amount);
+        if (isNaN(numericAmount) || numericAmount <= 0) {
+            showModal('Monto Inválido', 'El monto debe ser numérico y mayor a 0', 'error');
+            return;
+        }
+
+        // Logic: Available Credit = CurrentAvailable + OriginalAmountOfThisTransaction
+        // If I increase amount, it consumes more.
+        const effectiveAvailable = availableCredit + originalAmount;
+        if (numericAmount > effectiveAvailable) {
+            showModal('Cupo Insuficiente', `El nuevo monto excede el cupo disponible (Max: ${formatCurrency(effectiveAvailable)})`, 'error');
+            return;
+        }
+
+        showModal(
+            'Confirmar Cambios',
+            '¿Guardar los cambios? Se recalcularán las cuotas futuras basadas en la fecha original del gasto.',
+            'confirmation',
+            async () => {
+                await processUpdate();
+                setModalVisible(false);
+            },
+            'Guardar'
+        );
+    };
+
+    const processUpdate = async () => {
         try {
-            // Need card details for EA
-            const db = getDb();
-            const card = await db.getFirstAsync<any>('SELECT * FROM cards WHERE id = ?', [cardId]);
+            // Use centralized update function with Sync
+            const { updatePurchaseWithInstallments } = await import('../database/database');
 
-            // ... calculations identical to createInstallmentPurchase ...
-            const eaDecimal = card.interest_rate_ea / 100;
-            const tem = Math.pow(1 + eaDecimal, 1 / 12) - 1;
-
-            const totalAmount = parseFloat(amount);
+            const totalAmount = parseCurrencyInput(amount);
             const totalInstallments = parseInt(installments);
 
-            // Amortization
-            let totalWithInterest = 0;
-            let tempBalance = totalAmount;
-            const capitalPerInstallment = totalAmount / totalInstallments;
+            await updatePurchaseWithInstallments(
+                transactionId,
+                cardId,
+                selectedPersonId,
+                totalAmount,
+                totalInstallments,
+                notes,
+                date // Original date
+            );
 
-            for (let i = 0; i < totalInstallments; i++) {
-                const interest = totalInstallments === 1 ? 0 : tempBalance * tem;
-                totalWithInterest += (capitalPerInstallment + interest);
-                tempBalance -= capitalPerInstallment;
-            }
-
-            // Update Purchase
-            await db.runAsync(`
-                UPDATE purchases 
-                SET amount = ?, total_with_interest = ?, notes = ?, installments_total = ?, interest_rate_ea = ?, person_id = ?
-                WHERE id = ?
-             `, [totalAmount, totalWithInterest, notes, totalInstallments, card.interest_rate_ea, selectedPersonId, transactionId]);
-
-            // Delete old installments
-            await db.runAsync('DELETE FROM installments WHERE purchase_id = ?', [transactionId]);
-
-            // Generate new installments
-            let today = new Date(date); // Use existing date
-
-            // 1. Cut Off Relative to Purchase Date
-            let targetCutOffMonth = today.getMonth();
-            let targetCutOffYear = today.getFullYear();
-
-            if (today.getDate() > card.cut_day) {
-                targetCutOffMonth++;
-            }
-
-            const cutOff = getSafeDate(targetCutOffYear, targetCutOffMonth, card.cut_day);
-
-            let targetPayMonth = cutOff.getMonth();
-            let targetPayYear = cutOff.getFullYear();
-
-            if (card.pay_day < card.cut_day) {
-                targetPayMonth++;
-            }
-
-            const firstPayDate = getSafeDate(targetPayYear, targetPayMonth, card.pay_day);
-
-            let currentBalance = totalAmount;
-            for (let i = 0; i < totalInstallments; i++) {
-                const interestAmount = totalInstallments === 1 ? 0 : currentBalance * tem;
-                const totalInstallmentAmount = capitalPerInstallment + interestAmount;
-
-                const installmentDate = getSafeDate(
-                    firstPayDate.getFullYear(),
-                    firstPayDate.getMonth() + i,
-                    card.pay_day
-                );
-
-                await db.runAsync(
-                    `INSERT INTO installments
-                    (purchase_id, installment_number, amount, capital, interest, due_date)
-                    VALUES (?, ?, ?, ?, ?, ?)`,
-                    [transactionId, i + 1, totalInstallmentAmount, capitalPerInstallment, interestAmount, installmentDate.toISOString()]
-                );
-                currentBalance -= capitalPerInstallment;
-            }
-
-            Alert.alert('Éxito', 'Gasto actualizado');
             onBack();
 
         } catch (error) {
             console.error(error);
-            Alert.alert('Error', 'No se pudo actualizar');
+            showModal('Error', 'No se pudo actualizar', 'error');
         }
     };
 
@@ -171,7 +195,11 @@ export default function EditTransaction({ transactionId, cardId, onBack }: EditT
     }
 
     return (
-        <View style={[styles.container, { backgroundColor: colors.background }]}>
+        <KeyboardAvoidingView
+            style={[styles.container, { backgroundColor: colors.background }]}
+            behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+            keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 20}
+        >
             <View style={styles.header}>
                 <TouchableOpacity onPress={onBack} style={[styles.backButton, { backgroundColor: colors.cardBg, borderColor: colors.border }]}>
                     <Ionicons name="arrow-back" size={24} color={colors.text} />
@@ -179,24 +207,52 @@ export default function EditTransaction({ transactionId, cardId, onBack }: EditT
                 <Text style={[styles.title, { color: colors.text }]}>Editar Gasto</Text>
             </View>
 
-            <ScrollView contentContainerStyle={styles.form}>
-                <Text style={[styles.label, { color: colors.textMuted }]}>Monto</Text>
-                <TextInput
-                    style={[styles.input, { backgroundColor: colors.inputBg, color: colors.text, borderColor: colors.border }]}
-                    value={amount}
-                    onChangeText={setAmount}
-                    keyboardType="numeric"
-                    placeholderTextColor={colors.textMuted}
-                />
+            <ScrollView contentContainerStyle={styles.form} showsVerticalScrollIndicator={false}>
+                <View style={[styles.card, { backgroundColor: colors.cardBg, borderColor: colors.border }]}>
+                    <Text style={[styles.label, { color: colors.textMuted }]}>Monto de la compra</Text>
+                    <View style={styles.inputContainer}>
+                        <Text style={[styles.currencyPrefix, { color: colors.textMuted }]}>$</Text>
+                        <TextInput
+                            style={[styles.amountInput, { color: colors.text }]}
+                            placeholder="0"
+                            placeholderTextColor={colors.textMuted}
+                            value={amount}
+                            onChangeText={(text) => setAmount(formatNumberInput(text))}
+                            keyboardType="numeric"
+                            autoFocus
+                        />
+                    </View>
+                    <Text style={{ color: colors.textMuted, marginTop: 5, fontSize: 12 }}>
+                        Original: {formatCurrency(originalAmount)}
+                    </Text>
+                </View>
 
-                <Text style={[styles.label, { color: colors.textMuted }]}>Cuotas</Text>
-                <TextInput
-                    style={[styles.input, { backgroundColor: colors.inputBg, color: colors.text, borderColor: colors.border }]}
-                    value={installments}
-                    onChangeText={setInstallments}
-                    keyboardType="numeric"
-                    placeholderTextColor={colors.textMuted}
-                />
+                <View style={{ marginBottom: spacing.md }}>
+                    <Text style={[styles.label, { color: colors.textMuted }]}>Cuotas</Text>
+                    <View style={[styles.counterContainer, { backgroundColor: colors.inputBg, borderColor: colors.border }]}>
+                        <TouchableOpacity
+                            onPress={() => adjustInstallments(-1)}
+                            style={[styles.counterButton, { borderRightColor: colors.border }]}
+                        >
+                            <Ionicons name="remove" size={20} color={colors.primary} />
+                        </TouchableOpacity>
+
+                        <TextInput
+                            style={[styles.counterInput, { color: colors.text }]}
+                            value={installments}
+                            onChangeText={(text) => setInstallments(text.replace(/[^0-9]/g, ''))}
+                            keyboardType="numeric"
+                            textAlign="center"
+                        />
+
+                        <TouchableOpacity
+                            onPress={() => adjustInstallments(1)}
+                            style={[styles.counterButton, { borderLeftColor: colors.border }]}
+                        >
+                            <Ionicons name="add" size={20} color={colors.primary} />
+                        </TouchableOpacity>
+                    </View>
+                </View>
 
                 <Text style={[styles.label, { color: colors.textMuted }]}>Descripción</Text>
                 <TextInput
@@ -231,7 +287,7 @@ export default function EditTransaction({ transactionId, cardId, onBack }: EditT
                         style={[styles.addPersonBtn, { borderColor: colors.primary }]}
                         onPress={() => setShowNewPerson(!showNewPerson)}
                     >
-                        <Text style={[styles.addPersonText, { color: colors.primary }]}>+</Text>
+                        <Ionicons name="add" size={20} color={colors.primary} />
                     </TouchableOpacity>
                 </View>
 
@@ -267,7 +323,18 @@ export default function EditTransaction({ transactionId, cardId, onBack }: EditT
                     <Text style={[styles.deleteButtonText, { color: colors.error }]}>Eliminar Gasto</Text>
                 </TouchableOpacity>
             </ScrollView>
-        </View>
+
+            <CustomModal
+                visible={modalVisible}
+                title={modalConfig.title}
+                message={modalConfig.message}
+                type={modalConfig.type}
+                onClose={() => setModalVisible(false)}
+                onConfirm={modalConfig.onConfirm}
+                confirmText={modalConfig.confirmText}
+                cancelText={modalConfig.cancelText}
+            />
+        </KeyboardAvoidingView>
     );
 }
 
@@ -285,8 +352,11 @@ const styles = StyleSheet.create({
         paddingVertical: spacing.md
     },
     backButton: {
-        padding: 8,
+        width: 40,
+        height: 40,
         borderRadius: borderRadius.md,
+        justifyContent: 'center',
+        alignItems: 'center',
         marginRight: spacing.md,
         borderWidth: 1,
     },
@@ -370,10 +440,6 @@ const styles = StyleSheet.create({
         alignItems: 'center',
         borderStyle: 'dashed'
     },
-    addPersonText: {
-        fontSize: 20,
-        fontWeight: 'bold'
-    },
     newPersonRow: {
         flexDirection: 'row',
         alignItems: 'center',
@@ -382,5 +448,50 @@ const styles = StyleSheet.create({
     smallBtn: {
         padding: 16,
         borderRadius: borderRadius.md
+    },
+    card: {
+        borderRadius: 16,
+        padding: 20,
+        marginBottom: 24,
+        alignItems: 'center',
+        borderWidth: 1,
+        borderColor: 'rgba(255,255,255,0.1)'
+    },
+    inputContainer: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        marginTop: 10
+    },
+    currencyPrefix: {
+        fontSize: 32,
+        fontWeight: 'bold',
+        marginRight: 4
+    },
+    amountInput: {
+        fontSize: 40,
+        fontWeight: 'bold',
+        minWidth: 100,
+        textAlign: 'center'
+    },
+    counterContainer: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        borderWidth: 1,
+        borderRadius: 12,
+        height: 56, // Match standard input height
+        overflow: 'hidden'
+    },
+    counterButton: {
+        width: 48,
+        height: '100%',
+        justifyContent: 'center',
+        alignItems: 'center',
+        backgroundColor: 'rgba(0,0,0,0.02)'
+    },
+    counterInput: {
+        flex: 1,
+        fontSize: 18,
+        fontWeight: 'bold',
+        height: '100%'
     }
 });
