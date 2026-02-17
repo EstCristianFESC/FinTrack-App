@@ -24,6 +24,8 @@ export default function PaymentSummary({ cardId, cutOffDate, onBack, onPaymentSu
     const loadSummary = async () => {
         try {
             const result = await getPaymentSummaryDetails(cardId, cutOffDate);
+            console.log("--- Payment Summary Debug ---");
+            console.log(JSON.stringify(result, null, 2));
             setData(result);
         } catch (error) {
             console.error(error);

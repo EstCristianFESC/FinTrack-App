@@ -23,10 +23,11 @@ export async function createInstallmentPurchase(
     personId: number | null,
     totalAmount: number,
     totalInstallments: number,
-    notes: string
+    notes: string,
+    dateIso?: string // Optional date override
 ) {
     const db = getDb();
-    const today = new Date();
+    const today = dateIso ? new Date(dateIso) : new Date();
 
     // Obtener datos de la tarjeta para calcular fechas y tasas
     const card = await db.getFirstAsync<{ cut_day: number; pay_day: number; interest_rate_ea: number }>(
@@ -150,8 +151,6 @@ export async function createInstallmentPurchase(
         );
 
         currentBalance -= capitalPerInstallment;
-
-        currentBalance -= capitalPerInstallment;
     }
 
     // Sync to Firestore
@@ -263,7 +262,9 @@ export async function getCardSummary(cardId: number) {
         nextPayDate: nextPayDate,
         nextCutOffDate: nextCutOffDate,
         eaRate: card.interest_rate_ea,
-        card_type: card.card_type // Ensure this is passed through
+        card_type: card.card_type,
+        pay_day: card.pay_day,
+        cut_day: card.cut_day
     };
 }
 
@@ -277,21 +278,26 @@ export async function markPeriodAsPaid(cardId: number, cutOffDate: string) {
     if (!card) return;
 
     const cutOff = new Date(cutOffDate);
-    let payDate = new Date(cutOff.getFullYear(), cutOff.getMonth(), card.pay_day);
+    // Use getSafeDate to ensure we don't overflow (e.g. Feb 30 -> Mar 2)
+    let payDate = getSafeDate(cutOff.getFullYear(), cutOff.getMonth(), card.pay_day);
+
     if (card.pay_day < card.cut_day) {
-        payDate.setMonth(payDate.getMonth() + 1);
+        // If PayDay < CutDay, it's next month
+        payDate = getSafeDate(cutOff.getFullYear(), cutOff.getMonth() + 1, card.pay_day);
     }
 
+    console.log(`Marking as Paid for Card ${cardId}, CutOff: ${cutOffDate}`);
+    console.log(`Calculated PayDate Limit: ${payDate.toISOString()}`);
 
-
-    await db.runAsync(
+    const result = await db.runAsync(
         `UPDATE installments
          SET paid = 1
-         WHERE paid = 0 
+         WHERE paid = 0
          AND date(due_date) <= date(?)
          AND purchase_id IN (SELECT id FROM purchases WHERE card_id = ?)`,
         [payDate.toISOString(), cardId]
     );
+    console.log(`Rows affected: ${result.changes}`);
 
 
     // Sync Changes
@@ -732,6 +738,64 @@ export async function getPaymentSummaryDetails(cardId: number, cutOffDateIso: st
     };
 }
 
+export async function getStatementItems(cardId: number, cutOffDateIso: string) {
+    const db = getDb();
+    const card = await db.getFirstAsync<{ pay_day: number, cut_day: number }>(
+        'SELECT pay_day, cut_day FROM cards WHERE id = ?', [cardId]
+    );
+    if (!card) return [];
+
+    const cutOff = new Date(cutOffDateIso);
+    // Calculate Pay Date for this Cut-Off
+    let payDate = getSafeDate(cutOff.getFullYear(), cutOff.getMonth(), card.pay_day);
+    if (card.pay_day < card.cut_day) {
+        payDate = getSafeDate(cutOff.getFullYear(), cutOff.getMonth() + 1, card.pay_day);
+    }
+
+    // Query Installments DUE on this Pay Date
+    // We want to show:
+    // 1. Installments specifically due on this date.
+    // 2. What about past due? Statement usually shows current + past due. 
+    //    But for "Period View", usually just that period's bill.
+    //    However, user expects to see what they have to pay.
+    //    Let's stick to "Installments falling in this bucket".
+    //    Actually, better to match "PaymentSummary" logic?
+    //    PaymentSummary includes ALL past due. 
+    //    But "History" view usually separates months.
+    //    If I toggle to Feb, I want to see Feb's bill.
+    //    So strictly filter by due_date match? 
+    //    Or due_date <= payDate AND due_date > prevPayDate?
+    //    Since our generator makes exact due_dates, exact match is safest for "This Month's Portion".
+
+    //    Wait, getPaymentSummary shows ALL past due. 
+    //    If I go to Jan view, I should see Jan bill.
+    //    If I go to Feb view, I should see Feb bill.
+    //    If I didn't pay Jan, does Feb view show Jan + Feb? 
+    //    Standard bank app: Statement Jan shows Jan items. Statement Feb shows Feb items + "Previous Balance".
+    //    For simplicity, let's show items DUE in this period.
+
+    //    Constraint: Our due_dates are ISO strings. We should match DATE part.
+
+    return await db.getAllAsync(`
+        SELECT 
+            i.id,
+            p.id as purchase_id,
+            p.notes,
+            i.due_date as date, -- Show due date as the "effective" date for the statement
+            i.amount,
+            IFNULL(pe.name, 'Yo') as person_name,
+            i.installment_number as installments_current,
+            p.installments_total,
+            i.paid
+        FROM installments i
+        JOIN purchases p ON i.purchase_id = p.id
+        LEFT JOIN people pe ON p.person_id = pe.id
+        WHERE p.card_id = ?
+        AND date(i.due_date) = date(?) -- Exact match for this period
+        ORDER BY i.due_date DESC
+    `, [cardId, payDate.toISOString()]);
+}
+
 // --- Update Functions (with Sync) ---
 
 export async function updateCard(
@@ -813,9 +877,9 @@ export async function updatePurchaseWithInstallments(
     // 3. Update Purchase Record
     await db.runAsync(`
         UPDATE purchases 
-        SET amount = ?, total_with_interest = ?, notes = ?, installments_total = ?, interest_rate_ea = ?, person_id = ?
+        SET amount = ?, total_with_interest = ?, notes = ?, installments_total = ?, interest_rate_ea = ?, person_id = ?, date = ?
         WHERE id = ?
-     `, [totalAmount, totalWithInterest, notes, totalInstallments, card.interest_rate_ea, personId, purchaseId]);
+     `, [totalAmount, totalWithInterest, notes, totalInstallments, card.interest_rate_ea, personId, originalDateIso, purchaseId]);
 
     // 4. Regenerate Installments
     // Delete old

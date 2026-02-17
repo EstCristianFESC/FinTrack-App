@@ -1,7 +1,7 @@
 import { View, Text, FlatList, TouchableOpacity, StyleSheet, ActivityIndicator, Alert, ScrollView, Modal } from 'react-native';
 import { useState, useEffect } from 'react';
 import { LinearGradient } from 'expo-linear-gradient';
-import { getCardSummary, getTransactionsByCard, markPeriodAsPaid, unmarkPeriodAsPaid, getPeriodStatus, getAvailablePeriods, getTransactionsByPeriod } from '../database/database';
+import { getCardSummary, getTransactionsByCard, markPeriodAsPaid, unmarkPeriodAsPaid, getPeriodStatus, getAvailablePeriods, getTransactionsByPeriod, getStatementItems, getSafeDate } from '../database/database';
 import TransactionItem from '../components/TransactionItem';
 import { useTheme } from '../context/ThemeContext';
 import { colors as tokens, spacing, borderRadius, shadows, typography } from '../theme/designTokens';
@@ -47,15 +47,20 @@ export default function CardDetail({ cardId, onBack, onNavigate }: CardDetailPro
 
             let txs;
             if (currentPeriod) {
-                txs = await getTransactionsByPeriod(cardId, currentPeriod.startDate, currentPeriod.endDate);
+                // Use new Statement Logic
+                txs = await getStatementItems(cardId, currentPeriod.endDate);
             } else {
-                // Fallback to all if no periods (e.g. new card)
+                // Fallback to all purchases if no periods (e.g. newly created card)
                 txs = await getTransactionsByCard(cardId);
             }
 
             setTransactions(txs);
 
-            if (sum) {
+            if (sum && currentPeriod) {
+                // Check status based on the selected period's cutoff
+                const status = await getPeriodStatus(cardId, currentPeriod.endDate);
+                setPeriodStatus(status);
+            } else if (sum) {
                 const status = await getPeriodStatus(cardId, sum.nextCutOffDate.toISOString());
                 setPeriodStatus(status);
             }
@@ -80,8 +85,14 @@ export default function CardDetail({ cardId, onBack, onNavigate }: CardDetailPro
         setShowPeriodSelector(false);
         setLoading(true);
         try {
-            const txs = await getTransactionsByPeriod(cardId, period.startDate, period.endDate);
+            // Use new Statement Logic
+            const txs = await getStatementItems(cardId, period.endDate);
             setTransactions(txs);
+
+            // Update period status too
+            const status = await getPeriodStatus(cardId, period.endDate);
+            setPeriodStatus(status);
+
         } catch (error) {
             console.error(error);
         } finally {
@@ -94,10 +105,14 @@ export default function CardDetail({ cardId, onBack, onNavigate }: CardDetailPro
     };
 
     const handlePayCutOff = () => {
-        if (!summary || summary.paymentForIssue <= 0) return;
+        // Use selected period date if available, otherwise current summary date
+        const cutOffToPay = selectedPeriod ? selectedPeriod.endDate : (summary ? summary.nextCutOffDate : null);
+
+        if (!cutOffToPay) return;
+
         onNavigate('PaymentSummary', {
             cardId,
-            cutOffDate: summary.nextCutOffDate.toISOString()
+            cutOffDate: typeof cutOffToPay === 'string' ? cutOffToPay : cutOffToPay.toISOString()
         });
     };
 
@@ -189,36 +204,76 @@ export default function CardDetail({ cardId, onBack, onNavigate }: CardDetailPro
                     colors={theme === 'dark' ? ['#133154', '#0A2540'] : ['#FFFFFF', '#F3F4F6']}
                     style={[styles.summaryCard, { borderColor: colors.border }]}
                 >
-                    <View style={styles.row}>
-                        <View>
-                            <Text style={[styles.label, { color: colors.textMuted }]}>
-                                PAGO PRÓXIMO <Text style={{ fontWeight: '400' }}>({formatDate(new Date(summary.nextPayDate))})</Text>
-                            </Text>
-                            <Text style={[styles.bigValue, { color: summary.paymentForIssue > 0 ? tokens.error : colors.text }]}>
-                                {formatCurrency(summary.paymentForIssue)}
-                            </Text>
+                    {/* Calculate dynamic values for the Selected Period */}
+                    {(() => {
+                        // 1. Determine Date to Display
+                        let displayPayDate = new Date(summary.nextPayDate); // Default to current
 
-                            <View style={{ flexDirection: 'row', gap: 10, marginTop: 12 }}>
-                                {summary.paymentForIssue > 0 && (
-                                    <TouchableOpacity onPress={handlePayCutOff} style={[styles.payButton, { backgroundColor: colors.success }]}>
-                                        <Text style={[styles.payButtonText, { color: '#003300' }]}>Pagar Corte</Text>
-                                    </TouchableOpacity>
-                                )}
+                        if (selectedPeriod) {
+                            const cutOff = new Date(selectedPeriod.endDate);
+                            const payDay = summary.pay_day;
+                            const cutDay = summary.cut_day;
 
-                                {periodStatus.isPaid && (
-                                    <TouchableOpacity onPress={handleRevertPayment} style={[styles.payButton, { backgroundColor: 'transparent', borderWidth: 1, borderColor: colors.error }]}>
-                                        <Text style={[styles.payButtonText, { color: colors.error }]}>Deshacer Pago</Text>
-                                    </TouchableOpacity>
-                                )}
+                            // Calculate Pay Date relative to this Cut-Off
+                            // Same logic as database.ts
+                            let calculatedPayDate = getSafeDate(cutOff.getFullYear(), cutOff.getMonth(), payDay);
+                            if (payDay < cutDay) {
+                                // If pay day is before cut day, it's next month relative to cut off MONTH
+                                // usage of getSafeDate handles month overflow
+                                calculatedPayDate = getSafeDate(cutOff.getFullYear(), cutOff.getMonth() + 1, payDay);
+                            }
+                            displayPayDate = calculatedPayDate;
+                        }
+
+                        // 2. Determine Amount
+                        // If we are in "Statement Mode" (transactions contains statement items),
+                        // The total to pay is the sum of these items.
+                        const totalForPeriod = transactions.reduce((sum, item) => sum + item.amount, 0);
+
+                        return (
+                            <View style={styles.row}>
+                                <View>
+                                    <Text style={[styles.label, { color: colors.textMuted }]}>
+                                        TOTAL A PAGAR <Text style={{ fontWeight: '400' }}>({selectedPeriod ? selectedPeriod.label : 'Actual'})</Text>
+                                    </Text>
+                                    <View style={{ flexDirection: 'row', alignItems: 'baseline', gap: 8 }}>
+                                        <Text style={[styles.bigValue, { color: !periodStatus.isPaid && totalForPeriod > 0 ? tokens.error : colors.text }]}>
+                                            {formatCurrency(totalForPeriod)}
+                                        </Text>
+                                    </View>
+                                    <Text style={[styles.label, { color: colors.warning, fontSize: 13, marginTop: -4, marginBottom: 8 }]}>
+                                        Fecha Límite: {formatDate(displayPayDate)}
+                                    </Text>
+
+                                    <View style={{ flexDirection: 'row', gap: 10, marginTop: 4 }}>
+                                        {!periodStatus.isPaid && totalForPeriod > 0 && (
+                                            <TouchableOpacity onPress={handlePayCutOff} style={[styles.payButton, { backgroundColor: colors.success }]}>
+                                                <Text style={[styles.payButtonText, { color: '#003300' }]}>Pagar Corte</Text>
+                                            </TouchableOpacity>
+                                        )}
+
+                                        {periodStatus.isPaid && (
+                                            <TouchableOpacity onPress={handleRevertPayment} style={[styles.payButton, { backgroundColor: 'transparent', borderWidth: 1, borderColor: colors.error }]}>
+                                                <Text style={[styles.payButtonText, { color: colors.error }]}>Deshacer Pago</Text>
+                                            </TouchableOpacity>
+                                        )}
+
+                                        {periodStatus.isPaid && (
+                                            <View style={[styles.payButton, { backgroundColor: colors.success + '20', borderWidth: 0 }]}>
+                                                <Text style={[styles.payButtonText, { color: colors.success }]}>Pagado ✓</Text>
+                                            </View>
+                                        )}
+                                    </View>
+                                </View>
                             </View>
-                        </View>
-                    </View>
+                        );
+                    })()}
 
                     <View style={[styles.divider, { backgroundColor: colors.border }]} />
 
                     <View style={styles.row}>
                         <View>
-                            <Text style={[styles.label, { color: colors.textMuted }]}>DEUDA TOTAL</Text>
+                            <Text style={[styles.label, { color: colors.textMuted }]}>DEUDA TOTAL CARD</Text>
                             <Text style={[styles.value, { color: colors.text }]}>{formatCurrency(summary.totalDebt)}</Text>
                         </View>
                         <View style={{ alignItems: 'flex-end' }}>

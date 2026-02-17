@@ -5,6 +5,7 @@ import { useTheme } from '../context/ThemeContext';
 import { spacing, borderRadius, shadows, typography } from '../theme/designTokens';
 import { Ionicons } from '@expo/vector-icons';
 import CustomModal from '../components/CustomModal';
+import DatePickerModal from '../components/DatePickerModal';
 import { formatCurrency, formatNumberInput, parseCurrencyInput } from '../utils/formatters';
 
 interface EditTransactionProps {
@@ -20,7 +21,8 @@ export default function EditTransaction({ transactionId, cardId, onBack }: EditT
     const [loading, setLoading] = useState(true);
 
     const [installments, setInstallments] = useState('');
-    const [date, setDate] = useState('');
+    const [date, setDate] = useState<Date>(new Date());
+    const [showDatePicker, setShowDatePicker] = useState(false);
 
     const [people, setPeople] = useState<any[]>([]);
     const [selectedPersonId, setSelectedPersonId] = useState<number | null>(null);
@@ -62,7 +64,15 @@ export default function EditTransaction({ transactionId, cardId, onBack }: EditT
             setOriginalAmount(tx.amount); // Keep reference to calculate delta
             setNotes(tx.notes);
             setInstallments(tx.installments_total.toString());
-            setDate(tx.date); // Keep full ISO string if needed for re-calc
+            setInstallments(tx.installments_total.toString());
+
+            // Set date object
+            if (tx.date) {
+                setDate(new Date(tx.date));
+            } else {
+                setDate(new Date());
+            }
+
             setSelectedPersonId(tx.person_id);
         }
         setLoading(false);
@@ -140,6 +150,12 @@ export default function EditTransaction({ transactionId, cardId, onBack }: EditT
             return;
         }
 
+        // Date is already a Date object, so no regex validation needed.
+        if (isNaN(date.getTime())) {
+            showModal('Fecha Inválida', 'La fecha seleccionada no es válida', 'error');
+            return;
+        }
+
         // Logic: Available Credit = CurrentAvailable + OriginalAmountOfThisTransaction
         // If I increase amount, it consumes more.
         const effectiveAvailable = availableCredit + originalAmount;
@@ -168,6 +184,14 @@ export default function EditTransaction({ transactionId, cardId, onBack }: EditT
             const totalAmount = parseCurrencyInput(amount);
             const totalInstallments = parseInt(installments);
 
+            // Use selected date with fixed time to avoid timezone shifts
+            const newDateIso = new Date(
+                date.getFullYear(),
+                date.getMonth(),
+                date.getDate(),
+                12, 0, 0
+            ).toISOString();
+
             await updatePurchaseWithInstallments(
                 transactionId,
                 cardId,
@@ -175,7 +199,7 @@ export default function EditTransaction({ transactionId, cardId, onBack }: EditT
                 totalAmount,
                 totalInstallments,
                 notes,
-                date // Original date
+                newDateIso // Updated date
             );
 
             onBack();
@@ -226,6 +250,22 @@ export default function EditTransaction({ transactionId, cardId, onBack }: EditT
                         Original: {formatCurrency(originalAmount)}
                     </Text>
                 </View>
+
+                <TouchableOpacity
+                    style={[styles.card, { backgroundColor: colors.cardBg, borderColor: colors.border, padding: 15, marginBottom: spacing.md }]}
+                    onPress={() => setShowDatePicker(true)}
+                >
+                    <Text style={[styles.label, { color: colors.textMuted }]}>Fecha de Compra</Text>
+                    <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+                        <Text style={{ fontSize: 18, fontWeight: 'bold', color: colors.text }}>
+                            {date.toLocaleDateString('es-CO', { day: 'numeric', month: 'long', year: 'numeric' })}
+                        </Text>
+                        <Ionicons name="calendar-outline" size={24} color={colors.primary} />
+                    </View>
+                    <Text style={{ color: colors.textMuted, fontSize: 11, marginTop: 4 }}>
+                        Toca para cambiar. Se recalculará el período.
+                    </Text>
+                </TouchableOpacity>
 
                 <View style={{ marginBottom: spacing.md }}>
                     <Text style={[styles.label, { color: colors.textMuted }]}>Cuotas</Text>
@@ -333,6 +373,16 @@ export default function EditTransaction({ transactionId, cardId, onBack }: EditT
                 onConfirm={modalConfig.onConfirm}
                 confirmText={modalConfig.confirmText}
                 cancelText={modalConfig.cancelText}
+            />
+            <DatePickerModal
+                visible={showDatePicker}
+                onClose={() => setShowDatePicker(false)}
+                onSelect={(d) => {
+                    setDate(d);
+                    setShowDatePicker(false);
+                }}
+                initialDate={date}
+                title="Fecha del Gasto"
             />
         </KeyboardAvoidingView>
     );

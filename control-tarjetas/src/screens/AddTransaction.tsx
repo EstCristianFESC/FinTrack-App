@@ -6,6 +6,7 @@ import { useTheme } from '../context/ThemeContext';
 import { spacing, borderRadius, shadows, typography } from '../theme/designTokens';
 import { Ionicons } from '@expo/vector-icons';
 import CustomModal from '../components/CustomModal';
+import DatePickerModal from '../components/DatePickerModal';
 import { formatCurrency, formatNumberInput, parseCurrencyInput } from '../utils/formatters';
 
 interface AddTransactionProps {
@@ -25,6 +26,10 @@ export default function AddTransaction({ cardId, onBack }: AddTransactionProps) 
     const [interestRate, setInterestRate] = useState('0'); // Default 0 for 1 installment
     const [card, setCard] = useState<any>(null);
     const [availableCredit, setAvailableCredit] = useState(0);
+
+    // Date
+    const [date, setDate] = useState<Date>(new Date());
+    const [showDatePicker, setShowDatePicker] = useState(false);
 
     // Modal State
     const [modalVisible, setModalVisible] = useState(false);
@@ -113,13 +118,41 @@ export default function AddTransaction({ cardId, onBack }: AddTransactionProps) 
         }
 
         try {
+            // Check if date is today or backdated
+            const isBackdated = date.toDateString() !== new Date().toDateString();
+
+            // If backdated, we need to pass the custom date
+            // But wait, createInstallmentPurchase handles 'today' by default.
+            // We need to modify createInstallmentPurchase to accept an optional date
+            // OR use update logic? No, create should support it.
+            // Let's modify createInstallmentPurchase in database.ts first? 
+            // The user implies they want to set date on creation too.
+            // For now let's pass it but verify if database.ts supports it. 
+            // Checking database.ts... createInstallmentPurchase takes (cardId, personId, totalAmount, totalInstallments, notes)
+            // It uses 'today = new Date()' inside.
+
+            // I need to update createInstallmentPurchase signature in database.ts OR
+            // just use it and then immediately update it? That's messy.
+            // Better to update the signature.
+            // I'll make a separate tool call to update database.ts signature.
+            // For this file, I'll pass the date assuming I'll fix database.ts next.
+
+            const customDateIso = new Date(
+                date.getFullYear(),
+                date.getMonth(),
+                date.getDate(),
+                12, 0, 0
+            ).toISOString();
+
             await createInstallmentPurchase(
                 cardId,
                 selectedPersonId,
                 numericAmount,
                 parseInt(installments),
-                notes
+                notes,
+                customDateIso // Adding this argument
             );
+
             showModal('¡Gasto Guardado!', 'El movimiento se registró exitosamente.', 'success', () => {
                 setModalVisible(false);
                 onBack();
@@ -170,6 +203,19 @@ export default function AddTransaction({ cardId, onBack }: AddTransactionProps) 
                         Disponible: {formatCurrency(availableCredit)}
                     </Text>
                 </View>
+
+                <TouchableOpacity
+                    style={[styles.card, { backgroundColor: colors.cardBg, borderColor: colors.border, padding: 15, marginBottom: spacing.md, alignItems: 'stretch' }]}
+                    onPress={() => setShowDatePicker(true)}
+                >
+                    <Text style={[styles.label, { color: colors.textMuted }]}>Fecha de Compra</Text>
+                    <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+                        <Text style={{ fontSize: 18, fontWeight: 'bold', color: colors.text }}>
+                            {date.toLocaleDateString('es-CO', { day: 'numeric', month: 'long', year: 'numeric' })}
+                        </Text>
+                        <Ionicons name="calendar-outline" size={24} color={colors.primary} />
+                    </View>
+                </TouchableOpacity>
 
                 <View style={styles.inputGroup}>
                     <Text style={[styles.label, { color: colors.textMuted }]}>Descripción</Text>
@@ -296,6 +342,16 @@ export default function AddTransaction({ cardId, onBack }: AddTransactionProps) 
                 onClose={() => setModalVisible(false)}
                 onConfirm={modalConfig.onConfirm}
                 confirmText="Aceptar"
+            />
+            <DatePickerModal
+                visible={showDatePicker}
+                onClose={() => setShowDatePicker(false)}
+                onSelect={(d) => {
+                    setDate(d);
+                    setShowDatePicker(false);
+                }}
+                initialDate={date}
+                title="Fecha del Gasto"
             />
         </KeyboardAvoidingView>
     );
