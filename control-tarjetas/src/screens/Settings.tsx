@@ -109,7 +109,8 @@ export default function Settings({ onNavigate, onBack }: SettingsProps) {
                 'Cancelar'
             );
         } else {
-            showModal('Error', 'No se pudo verificar la actualización.', 'error');
+            const errorMessage = result.error instanceof Error ? result.error.message : JSON.stringify(result.error || 'Error desconocido');
+            showModal('Error', `No se pudo verificar la actualización.\nDetalle: ${errorMessage}`, 'error');
         }
     };
 
@@ -212,9 +213,9 @@ export default function Settings({ onNavigate, onBack }: SettingsProps) {
             <CustomModal
                 visible={resetModalVisible}
                 type="warning"
-                title="Reiniciar Datos"
-                message="Esto eliminará TODAS tus tarjetas y transacciones. Tu perfil (nombre y foto) se conservará. ¿Estás seguro?"
-                confirmText="Eliminar Todo"
+                title="BORRADO GENERAL"
+                message="Esta acción eliminará PERMANENTEMENTE todos los datos de la aplicación (tarjetas, movimientos, usuarios, configuraciones) tanto del dispositivo como de la nube. La aplicación quedará como recién instalada. ¿Estás absolutamente seguro de continuar?"
+                confirmText="SÍ, BORRAR TODO"
                 cancelText="Cancelar"
                 onClose={() => setResetModalVisible(false)}
                 onConfirm={confirmResetData}

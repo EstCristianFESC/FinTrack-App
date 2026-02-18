@@ -64,9 +64,19 @@ export default function TransactionItem({ transaction, onPress }: TransactionIte
                     {formatCurrency(transaction.amount)}
                 </Text>
                 {transaction.installments_total > 1 && (
-                    <Text style={[styles.installments, { color: colors.warning }]}>
-                        {transaction.installments_current}/{transaction.installments_total}
-                    </Text>
+                    <View style={{ alignItems: 'flex-end' }}>
+                        <Text style={[styles.installments, { color: colors.warning }]}>
+                            {transaction.installments_current
+                                ? `${transaction.installments_current}/${transaction.installments_total}`
+                                : `${transaction.installments_total} Cuotas`
+                            }
+                        </Text>
+                        {transaction.original_amount && (
+                            <Text style={{ fontSize: 10, color: colors.textMuted }}>
+                                de {formatCurrency(transaction.original_amount)}
+                            </Text>
+                        )}
+                    </View>
                 )}
             </View>
         </TouchableOpacity>

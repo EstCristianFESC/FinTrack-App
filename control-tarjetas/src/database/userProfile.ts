@@ -16,7 +16,9 @@ export interface UserProfile {
 }
 
 
-import { saveUserProfileToFirestore, FirestoreUserProfile } from '../firebase/sync';
+import { saveUserProfileToFirestore } from '../firebase/sync';
+import { FirestoreUserProfile } from '../types';
+
 
 // ... existing code ...
 

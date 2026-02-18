@@ -1,7 +1,7 @@
 import { View, Text, TextInput, TouchableOpacity, StyleSheet, ScrollView, Alert, Switch, KeyboardAvoidingView, Platform } from 'react-native';
 import { useState, useEffect } from 'react';
 import { LinearGradient } from 'expo-linear-gradient';
-import { createInstallmentPurchase, getPeople, addPerson, getCardSummary } from '../database/database';
+import { createInstallmentPurchase, getPeople, addPerson, getCardSummary, getActiveParticipants } from '../database/database';
 import { useTheme } from '../context/ThemeContext';
 import { spacing, borderRadius, shadows, typography } from '../theme/designTokens';
 import { Ionicons } from '@expo/vector-icons';
@@ -144,14 +144,57 @@ export default function AddTransaction({ cardId, onBack }: AddTransactionProps) 
                 12, 0, 0
             ).toISOString();
 
-            await createInstallmentPurchase(
-                cardId,
-                selectedPersonId,
-                numericAmount,
-                parseInt(installments),
-                notes,
-                customDateIso // Adding this argument
-            );
+            if (selectedPersonId === -1) {
+                // --- MODO: DIVIDIR ENTRE TODOS (ACTIVOS) ---
+
+                // 1. Obtener IDs de personas con actividad en este corte
+                const activeIds = await getActiveParticipants(cardId, customDateIso);
+
+                // 2. Construir lista de participantes
+                // Siempre incluir a "Yo" (null) + activos encontrados.
+                // Filtrar duplicados por si acaso (aunque activeIds viene de DB IDs únicos, y 'Yo' es null)
+                const participantSet = new Set<number | null>();
+                participantSet.add(null); // Yo
+                activeIds.forEach(id => participantSet.add(id));
+
+                const participants = Array.from(participantSet);
+                const totalParticipants = participants.length;
+
+                // Aviso opcional si es el primer gasto
+                if (totalParticipants === 1) {
+                    // Solo soy yo. Podríamos mostrar alerta, pero el usuario pidió esto asi que procedemos.
+                    // Será un gasto 100% para mí.
+                    console.log('Split logic: Only user found active. Assigned 100% to user.');
+                }
+
+                // 3. Calcular monto individual
+                const individualAmount = numericAmount / totalParticipants;
+
+                // 4. Crear transacciones en paralelo
+                const promises = participants.map(participantId => {
+                    return createInstallmentPurchase(
+                        cardId,
+                        participantId, // null for "Yo", id for others
+                        individualAmount,
+                        parseInt(installments),
+                        `${notes} (1/${totalParticipants})`,
+                        customDateIso
+                    );
+                });
+
+                await Promise.all(promises);
+
+            } else {
+                // --- MODO NORMAL: UNA SOLA PERSONA ---
+                await createInstallmentPurchase(
+                    cardId,
+                    selectedPersonId,
+                    numericAmount,
+                    parseInt(installments),
+                    notes,
+                    customDateIso
+                );
+            }
 
             showModal('¡Gasto Guardado!', 'El movimiento se registró exitosamente.', 'success', () => {
                 setModalVisible(false);
@@ -283,6 +326,23 @@ export default function AddTransaction({ cardId, onBack }: AddTransactionProps) 
                             { color: selectedPersonId === null ? 'white' : colors.textMuted }
                         ]}>Yo</Text>
                     </TouchableOpacity>
+
+                    {/* Opción TODOS */}
+                    <TouchableOpacity
+                        style={[
+                            styles.personChip,
+                            { borderColor: colors.accent, backgroundColor: 'transparent' }, // Use accent color for distinction
+                            // Use -1 as ID for "Todos"
+                            selectedPersonId === -1 && { backgroundColor: colors.accent, borderColor: colors.accent }
+                        ]}
+                        onPress={() => setSelectedPersonId(-1)}
+                    >
+                        <Text style={[
+                            styles.personText,
+                            { color: selectedPersonId === -1 ? 'white' : colors.textMuted }
+                        ]}>Todos</Text>
+                    </TouchableOpacity>
+
                     {people.map(p => (
                         <TouchableOpacity
                             key={p.id}

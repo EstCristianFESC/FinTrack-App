@@ -3,7 +3,7 @@
     "name": "FinTrack",
     "slug": "control-tarjetas",
     "scheme": "fintrack",
-    "version": "1.1.0",
+    "version": "1.1.1",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
@@ -31,7 +31,7 @@
     "updates": {
       "url": "https://u.expo.dev/51c9d702-4f9c-4717-b809-2ebc259bcadc"
     },
-    "runtimeVersion": "1.0.0",
+    "runtimeVersion": "1.1.0",
     "plugins": [
       "expo-sqlite",
       "expo-web-browser"

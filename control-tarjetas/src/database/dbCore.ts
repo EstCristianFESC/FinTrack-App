@@ -1,10 +1,18 @@
-
 import * as SQLite from 'expo-sqlite';
+import * as FileSystem from 'expo-file-system';
 
 let db: SQLite.SQLiteDatabase;
 
 export async function initDatabase() {
     db = await SQLite.openDatabaseAsync('fintrack_pro.db');
+
+    // Habilitar WAL mode para mejorar concurrencia y evitar "database is locked"
+    try {
+        await db.execAsync('PRAGMA journal_mode = WAL;');
+        console.log('✅ WAL Mode habilitado');
+    } catch (e) {
+        console.log('⚠️ Warning: No se pudo habilitar WAL (posible lock previo):', e);
+    }
 
     await db.execAsync(`
         CREATE TABLE IF NOT EXISTS cards (
@@ -107,6 +115,64 @@ export async function initDatabase() {
     `);
 
     console.log('✅ Base de datos PRO inicializada correctamente');
+
+    // --- Índices para Optimización ---
+    try {
+        await db.execAsync(`
+            CREATE INDEX IF NOT EXISTS idx_purchases_card_id ON purchases(card_id);
+            CREATE INDEX IF NOT EXISTS idx_purchases_date ON purchases(date);
+            CREATE INDEX IF NOT EXISTS idx_installments_purchase_id ON installments(purchase_id);
+            CREATE INDEX IF NOT EXISTS idx_installments_due_date ON installments(due_date);
+            CREATE INDEX IF NOT EXISTS idx_installments_paid ON installments(paid);
+            CREATE INDEX IF NOT EXISTS idx_period_status_card_period ON period_status(card_id, period_iso);
+        `);
+        console.log('✅ Índices creados/verificados');
+    } catch (e) {
+        console.error('⚠️ Error creando índices:', e);
+    }
+}
+
+export async function deleteDatabaseFile() {
+    try {
+        // @ts-ignore
+        if (!FileSystem.documentDirectory) {
+            console.error('❌ FileSystem.documentDirectory is null, cannot delete DB file.');
+            throw new Error('FileSystem.documentDirectory is null');
+        }
+
+        if (db) {
+            await db.closeAsync();
+        }
+
+        // @ts-ignore
+        const dbDir = FileSystem.documentDirectory + 'SQLite';
+        const dbPath = dbDir + '/fintrack_pro.db';
+        const walPath = dbPath + '-wal';
+        const shmPath = dbPath + '-shm';
+
+        // Delete main DB file
+        const fileInfo = await FileSystem.getInfoAsync(dbPath);
+        if (fileInfo.exists) {
+            await FileSystem.deleteAsync(dbPath);
+            console.log('✅ Base de datos eliminada físicamente');
+        }
+
+        // Delete WAL files if they exist
+        const walInfo = await FileSystem.getInfoAsync(walPath);
+        if (walInfo.exists) {
+            await FileSystem.deleteAsync(walPath);
+        }
+        const shmInfo = await FileSystem.getInfoAsync(shmPath);
+        if (shmInfo.exists) {
+            await FileSystem.deleteAsync(shmPath);
+        }
+
+        console.log('✅ Archivos de base de datos eliminados correctamente');
+
+    } catch (e) {
+        console.error('❌ Error eliminando archivo de base de datos:', e);
+        throw e;
+    }
 }
 
 export function getDb() {

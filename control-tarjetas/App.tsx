@@ -51,31 +51,41 @@ function AppContent() {
   }, []);
 
   useEffect(() => {
-    const performSync = async () => {
-      if (user && isDbReady) {
-        console.log('🔄 validando sincronización para usuario:', user.uid);
+    const timer = setTimeout(() => {
+      const performSync = async () => {
+        if (user && isDbReady) {
+          console.log('🔄 validando sincronización para usuario:', user.uid);
 
-        // Audit: Check local cards
-        const db = await import('./src/database/dbCore').then(m => m.getDb());
-        const result = await db.getAllAsync('SELECT * FROM cards');
-        console.log('📊 Cartas locales encontradas:', result.length);
+          // Audit: Check local cards
+          try {
+            const db = await import('./src/database/dbCore').then(m => m.getDb());
+            const result = await db.getAllAsync('SELECT * FROM cards');
+            console.log('📊 Cartas locales encontradas:', result.length);
 
-        // Check if we need blocking restore
-        const shouldBlock = await import('./src/firebase/sync').then(m => m.isLocalDatabaseEmpty());
+            // Check if we need blocking restore
+            const shouldBlock = await import('./src/firebase/sync').then(m => m.isLocalDatabaseEmpty());
 
-        if (shouldBlock) {
-          setIsRestoring(true);
-          await syncDown(user.uid);
-          setIsRestoring(false);
-        } else {
-          // Background sync
-          syncDown(user.uid).then(() => console.log('Background sync done'));
+            if (shouldBlock) {
+              setIsRestoring(true);
+              await syncDown(user.uid);
+              setIsRestoring(false);
+            } else {
+              // Background sync
+              syncDown(user.uid).then(() => console.log('Background sync done'));
+            }
+
+            // Explicitly reload dashboard data if needed, but navigation triggers refetch usually
+          } catch (e) {
+            console.error("Sync init error:", e);
+          }
+
+          setCurrentScreen('Dashboard');
         }
+      };
+      performSync();
+    }, 2000); // Retraso de 2s para evitar DB locks al arranque
 
-        setCurrentScreen('Dashboard');
-      }
-    };
-    performSync();
+    return () => clearTimeout(timer);
   }, [user, isDbReady]);
 
   async function init() {
@@ -230,6 +240,7 @@ function AppContent() {
           cutOffDate={screenParams.cutOffDate}
           onBack={goBack}
           onPaymentSuccess={() => navigate('CardDetail', { cardId: screenParams.cardId })}
+          readonly={screenParams.readonly}
         />
       )}
 

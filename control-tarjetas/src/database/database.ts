@@ -9,11 +9,10 @@ import {
     saveInstallmentsBatchToFirestore,
     savePersonToFirestore,
     deleteCardFromFirestore,
-    deletePurchaseFromFirestore,
-    FirestoreCard,
-    FirestorePurchase,
-    FirestoreInstallment
+    deletePurchaseFromFirestore
 } from '../firebase/sync';
+import { FirestoreCard, FirestorePurchase, FirestoreInstallment } from '../types';
+
 
 export { initDatabase, getDb } from './dbCore';
 
@@ -37,9 +36,14 @@ export async function createInstallmentPurchase(
 
     if (!card) throw new Error('Tarjeta no encontrada');
 
+    // Convert to numbers to ensure safety
+    const cutDay = Number(card.cut_day);
+    const payDay = Number(card.pay_day);
+    const ea = Number(card.interest_rate_ea);
+
     // Calcular Tasa Efectiva Mensual (TEM) desde EA
     // Fórmula: TEM = (1 + EA)^(1/12) - 1
-    const eaDecimal = card.interest_rate_ea / 100;
+    const eaDecimal = ea / 100;
     const tem = Math.pow(1 + eaDecimal, 1 / 12) - 1;
 
     // Calcular proyección total con intereses (estimada para guardar en purchase)
@@ -67,7 +71,7 @@ export async function createInstallmentPurchase(
             today.toISOString(),
             notes,
             totalInstallments,
-            card.interest_rate_ea
+            ea
         ]
     );
 
@@ -82,7 +86,7 @@ export async function createInstallmentPurchase(
     let targetCutOffMonth = today.getMonth();
     let targetCutOffYear = today.getFullYear();
 
-    if (today.getDate() > card.cut_day) {
+    if (today.getDate() > cutDay) {
         targetCutOffMonth++;
     }
 
@@ -96,19 +100,18 @@ export async function createInstallmentPurchase(
 
     // Calculate First Pay Date
     // Rule: Pay Date corresponds to the Cut Date calculated above.
-    const cutOff = getSafeDate(targetCutOffYear, targetCutOffMonth, card.cut_day);
+    const cutOff = getSafeDate(targetCutOffYear, targetCutOffMonth, cutDay);
 
     let targetPayMonth = cutOff.getMonth();
     let targetPayYear = cutOff.getFullYear();
 
-    if (card.pay_day < card.cut_day) {
-        // If Pay Day is < Cut Day (e.g. Cut 15th, Pay 5th), usually means Pay is NEXT month relative to Cut.
-        // Wait, typical credit card: Cut 30th Jan -> Pay 15th Feb. 
-        // Logic: if pay_day < cut_day, add 1 month.
+    if (payDay < cutDay) {
+        // If Pay Day is < Cut Day (e.g. Cut 30th, Pay 5th), it means Pay comes AFTER Cut in the calendar.
+        // So we add 1 month to the Pay Month relative to the Cut Month.
         targetPayMonth++;
     }
 
-    const firstPayDate = getSafeDate(targetPayYear, targetPayMonth, card.pay_day);
+    const firstPayDate = getSafeDate(targetPayYear, targetPayMonth, payDay);
 
     console.log(`Purchase Date: ${today.toISOString()}`);
     console.log(`First Pay Date Calculated: ${firstPayDate.toISOString()}`);
@@ -187,6 +190,7 @@ export async function createInstallmentPurchase(
 
 
 export async function getCardSummary(cardId: number) {
+    if (!cardId) return null;
     const db = getDb();
 
     const card = await db.getFirstAsync<{
@@ -203,26 +207,24 @@ export async function getCardSummary(cardId: number) {
     if (!card) return null;
 
     // Calcular fechas del próximo corte y pago
+    const cutDay = Number(card.cut_day);
+    const payDay = Number(card.pay_day);
+
     const today = new Date();
     // Use getSafeDate to handle cases where today's day > target month's days (e.g. 30th Jan -> 28th Feb)
-    let nextCutOffDate = getSafeDate(today.getFullYear(), today.getMonth(), card.cut_day);
+    let nextCutOffDate = getSafeDate(today.getFullYear(), today.getMonth(), cutDay);
 
     // If today is past the cut off day, move to next month
-    // But be careful: today could be 31st Jan, cut day 30.
-    // getSafeDate(Jan, 30) -> Jan 30.
-    // today (Jan 31) > Jan 30 -> True.
-    // next month -> Feb.
     if (today > nextCutOffDate) {
-        nextCutOffDate = getSafeDate(today.getFullYear(), today.getMonth() + 1, card.cut_day);
+        nextCutOffDate = getSafeDate(today.getFullYear(), today.getMonth() + 1, cutDay);
     }
 
-    let nextPayDate = new Date(nextCutOffDate.getFullYear(), nextCutOffDate.getMonth(), card.pay_day);
-    if (card.pay_day < card.cut_day) {
-        nextPayDate.setMonth(nextPayDate.getMonth() + 1);
+    let nextPayDate = getSafeDate(nextCutOffDate.getFullYear(), nextCutOffDate.getMonth(), payDay);
+    if (payDay < cutDay) {
+        nextPayDate = getSafeDate(nextCutOffDate.getFullYear(), nextCutOffDate.getMonth() + 1, payDay);
     }
 
     // 1. Deuda Total de Capital (Lo que ocupa cupo)
-    // Es la suma de capital pendiente de pago
     const totalCapitalDebt = await db.getFirstAsync<{ total: number }>(
         `
         SELECT IFNULL(SUM(capital), 0) as total
@@ -237,6 +239,9 @@ export async function getCardSummary(cardId: number) {
 
     // 2. Pago para el corte
     // Suma TOTAL (Capital + Interés) de cuotas vencidas o que vencen en este ciclo
+    // IMPORTANTE: Asegurar que nextPayDate sea válido
+    const payDateIso = isNaN(nextPayDate.getTime()) ? new Date().toISOString() : nextPayDate.toISOString();
+
     const paymentForIssue = await db.getFirstAsync<{ total: number }>(
         `
         SELECT IFNULL(SUM(amount), 0) as total
@@ -247,7 +252,7 @@ export async function getCardSummary(cardId: number) {
             SELECT id FROM purchases WHERE card_id = ?
         )
         `,
-        [nextPayDate.toISOString(), cardId]
+        [payDateIso, cardId]
     );
 
     const used = totalCapitalDebt?.total || 0;
@@ -277,28 +282,26 @@ export async function markPeriodAsPaid(cardId: number, cutOffDate: string) {
     );
     if (!card) return;
 
+    const payDay = Number(card.pay_day);
+    const cutDay = Number(card.cut_day);
+
     const cutOff = new Date(cutOffDate);
     // Use getSafeDate to ensure we don't overflow (e.g. Feb 30 -> Mar 2)
-    let payDate = getSafeDate(cutOff.getFullYear(), cutOff.getMonth(), card.pay_day);
+    let payDate = getSafeDate(cutOff.getFullYear(), cutOff.getMonth(), payDay);
 
-    if (card.pay_day < card.cut_day) {
+    if (payDay < cutDay) {
         // If PayDay < CutDay, it's next month
-        payDate = getSafeDate(cutOff.getFullYear(), cutOff.getMonth() + 1, card.pay_day);
+        payDate = getSafeDate(cutOff.getFullYear(), cutOff.getMonth() + 1, payDay);
     }
-
-    console.log(`Marking as Paid for Card ${cardId}, CutOff: ${cutOffDate}`);
-    console.log(`Calculated PayDate Limit: ${payDate.toISOString()}`);
 
     const result = await db.runAsync(
         `UPDATE installments
          SET paid = 1
          WHERE paid = 0
-         AND date(due_date) <= date(?)
+         AND date(due_date) = date(?) -- Strict match for this period
          AND purchase_id IN (SELECT id FROM purchases WHERE card_id = ?)`,
         [payDate.toISOString(), cardId]
     );
-    console.log(`Rows affected: ${result.changes}`);
-
 
     // Sync Changes
     if (auth.currentUser) {
@@ -307,7 +310,7 @@ export async function markPeriodAsPaid(cardId: number, cutOffDate: string) {
             `SELECT * 
              FROM installments 
              WHERE paid = 1 
-             AND date(due_date) <= date(?)
+             AND date(due_date) = date(?)
              AND purchase_id IN (SELECT id FROM purchases WHERE card_id = ?)`,
             [payDate.toISOString(), cardId]
         );
@@ -335,9 +338,12 @@ export async function unmarkPeriodAsPaid(cardId: number, cutOffDate: string) {
     );
     if (!card) return;
 
+    const payDay = Number(card.pay_day);
+    const cutDay = Number(card.cut_day);
+
     const cutOff = new Date(cutOffDate);
-    let payDate = new Date(cutOff.getFullYear(), cutOff.getMonth(), card.pay_day);
-    if (card.pay_day < card.cut_day) {
+    let payDate = new Date(cutOff.getFullYear(), cutOff.getMonth(), payDay);
+    if (payDay < cutDay) {
         payDate.setMonth(payDate.getMonth() + 1);
     }
 
@@ -346,14 +352,16 @@ export async function unmarkPeriodAsPaid(cardId: number, cutOffDate: string) {
     // To be safe: Unmark only items within last 45 days? 
     // Let's keep it simple as per user request: "Deshacer".
 
+    // We targeting strictly the specific Pay Date items to avoid reverting previous legitimate payments.
+    // This assumes installments are generated exactly on pay_day.
+
     await db.runAsync(
         `UPDATE installments
          SET paid = 0
          WHERE paid = 1
-         AND date(due_date) <= date(?)
-         AND date(due_date) > date(?, '-45 days') 
+         AND date(due_date) = date(?) -- Strict match for this period
          AND purchase_id IN (SELECT id FROM purchases WHERE card_id = ?)`,
-        [payDate.toISOString(), payDate.toISOString(), cardId]
+        [payDate.toISOString(), cardId]
     );
 
     // Sync Changes
@@ -364,10 +372,9 @@ export async function unmarkPeriodAsPaid(cardId: number, cutOffDate: string) {
             `SELECT *
              FROM installments
              WHERE paid = 0
-             AND date(due_date) <= date(?)
-             AND date(due_date) > date(?, '-45 days')
+             AND date(due_date) = date(?)
              AND purchase_id IN (SELECT id FROM purchases WHERE card_id = ?)`,
-            [payDate.toISOString(), payDate.toISOString(), cardId]
+            [payDate.toISOString(), cardId]
         );
         const firestoreInstallments = modifiedInstallments.map(i => ({
             ...i,
@@ -400,10 +407,9 @@ export async function getPeriodStatus(cardId: number, cutOffDate: string) {
         `SELECT COUNT(*) as paid_count, SUM(amount) as total_amount
          FROM installments
          WHERE paid = 1
-         AND date(due_date) <= date(?)
-         AND date(due_date) > date(?, '-45 days')
+         AND date(due_date) = date(?)
          AND purchase_id IN (SELECT id FROM purchases WHERE card_id = ?)`,
-        [payDate.toISOString(), payDate.toISOString(), cardId]
+        [payDate.toISOString(), cardId]
     );
 
     return {
@@ -447,17 +453,31 @@ export async function getTransactionsByCard(cardId: number) {
     `, [cardId]);
 }
 
-export async function getTransactionsByPeriod(cardId: number, startDate: string, endDate: string) {
+export async function getTransactionsByPeriod(cardId: number, startDateIso: string, endDateIso: string) {
+    if (!startDateIso || !endDateIso) return [];
+
     const db = getDb();
+    // Validate Dates
+    const start = new Date(startDateIso);
+    const end = new Date(endDateIso);
+
+    if (isNaN(start.getTime()) || isNaN(end.getTime())) return [];
+
+    // Validate Dates - no longer needed as we pass ISO strings directly to date()
+    // const start = new Date(startDateIso);
+    // const end = new Date(endDateIso);
+
+    // if (isNaN(start.getTime()) || isNaN(end.getTime())) return [];
+
     return await db.getAllAsync(`
         SELECT p.*, pe.name as person_name 
         FROM purchases p 
         LEFT JOIN people pe ON p.person_id = pe.id
         WHERE p.card_id = ? 
-        AND p.date > ? 
-        AND p.date <= ?
+        AND date(p.date) >= date(?) 
+        AND date(p.date) <= date(?)
         ORDER BY p.date DESC
-    `, [cardId, startDate, endDate]);
+    `, [cardId, startDateIso, endDateIso]);
 }
 
 export async function getAvailablePeriods(cardId: number) {
@@ -548,7 +568,7 @@ export async function getAvailablePeriods(cardId: number) {
 export async function getCards() {
     const db = getDb();
     const user = auth.currentUser;
-    if (!user) return [];
+    if (!user || !user.uid) return [];
 
     return await db.getAllAsync('SELECT * FROM cards WHERE user_id = ?', [user.uid]);
 }
@@ -570,7 +590,7 @@ export async function createCard(
 
     if (!userId) throw new Error("Usuario no autenticado");
 
-    await db.runAsync(
+    const result = await db.runAsync(
         `
         INSERT INTO cards
         (user_id, name, bank, credit_limit, cut_day, pay_day, interest_rate_ea, last_four_digits, expiry_date, card_type)
@@ -592,8 +612,7 @@ export async function createCard(
 
     // Sync to Firestore
     if (auth.currentUser) {
-        const result = await db.getAllAsync<{ id: number }>('SELECT last_insert_rowid() as id');
-        const newId = result[0].id;
+        const newId = result.lastInsertRowId;
 
         const newCard: FirestoreCard = {
             id: newId,
@@ -624,7 +643,10 @@ export function getSafeDate(year: number, month: number, day: number): Date {
     // Create date at month + 1, day 0 -> Last day of 'month'
     const lastDayOfMonth = new Date(year, month + 1, 0).getDate();
     const safeDay = Math.min(day, lastDayOfMonth);
-    return new Date(year, month, safeDay);
+
+    // Usamos mediodía (12:00) para evitar problemas de timezone al convertir a ISO o cambiar de zona
+    // Esto previene que 00:00 se convierta en 23:00 del día anterior por cambios de horario
+    return new Date(year, month, safeDay, 12, 0, 0);
 }
 
 
@@ -636,7 +658,7 @@ export async function deletePurchase(purchaseId: number) {
 
     // Sync Delete
     if (auth.currentUser) {
-        deletePurchaseFromFirestore(auth.currentUser.uid, purchaseId);
+        await deletePurchaseFromFirestore(auth.currentUser.uid, purchaseId);
     }
 }
 
@@ -659,12 +681,12 @@ export async function deleteCard(cardId: number) {
 
     // Sync Delete
     if (auth.currentUser) {
-        deleteCardFromFirestore(auth.currentUser.uid, cardId);
+        await deleteCardFromFirestore(auth.currentUser.uid, cardId);
     }
 }
 
 
-export async function getPaymentSummaryDetails(cardId: number, cutOffDateIso: string) {
+export async function getPaymentSummaryDetails(cardId: number, cutOffDateIso: string, includePaid: boolean = false) {
     const db = getDb();
 
     // 1. Calculate Pay Date limit based on Cut-Off
@@ -705,84 +727,72 @@ export async function getPaymentSummaryDetails(cardId: number, cutOffDateIso: st
         FROM installments i
         JOIN purchases p ON i.purchase_id = p.id
         LEFT JOIN people pe ON p.person_id = pe.id
-        WHERE i.paid = 0
+        WHERE (i.paid = 0 OR ?)
         AND p.card_id = ?
         AND date(i.due_date) <= date(?)
         ORDER BY pe.name, p.date
         `,
-        [cardId, payDate.toISOString()]
+        [includePaid ? 1 : 0, cardId, payDate.toISOString()]
     );
 
-    // 3. Group by Person
-    const grouped: any = {};
+    // 3. Group by Type (OneShot vs Installments) AND Person
+    const oneShotGroup: any = {};
+    const installmentsGroup: any = {};
     let total = 0;
 
     details.forEach(item => {
+        total += item.amount;
         const key = item.person_name;
-        if (!grouped[key]) {
-            grouped[key] = {
+        const isOneShot = item.installments_total === 1;
+
+        const targetGroup = isOneShot ? oneShotGroup : installmentsGroup;
+
+        if (!targetGroup[key]) {
+            targetGroup[key] = {
                 personName: key,
                 total: 0,
                 items: []
             };
         }
-        grouped[key].total += item.amount;
-        grouped[key].items.push(item);
-        total += item.amount;
+        targetGroup[key].total += item.amount;
+        targetGroup[key].items.push(item);
     });
 
     return {
         totalToPay: total,
-        byPerson: Object.values(grouped),
-        payDate: payDate.toISOString()
+        payDate: payDate.toISOString(),
+        oneShot: Object.values(oneShotGroup),
+        installments: Object.values(installmentsGroup)
     };
 }
 
 export async function getStatementItems(cardId: number, cutOffDateIso: string) {
     const db = getDb();
-    const card = await db.getFirstAsync<{ pay_day: number, cut_day: number }>(
-        'SELECT pay_day, cut_day FROM cards WHERE id = ?', [cardId]
-    );
-    if (!card) return [];
+    const card = await db.getFirstAsync<any>('SELECT * FROM cards WHERE id = ?', [cardId]);
+    if (!card) return []; // Return empty if card not found
 
     const cutOff = new Date(cutOffDateIso);
+    if (isNaN(cutOff.getTime())) return [];
+
     // Calculate Pay Date for this Cut-Off
     let payDate = getSafeDate(cutOff.getFullYear(), cutOff.getMonth(), card.pay_day);
     if (card.pay_day < card.cut_day) {
         payDate = getSafeDate(cutOff.getFullYear(), cutOff.getMonth() + 1, card.pay_day);
     }
 
+    if (isNaN(payDate.getTime())) return [];
+
     // Query Installments DUE on this Pay Date
     // We want to show:
     // 1. Installments specifically due on this date.
-    // 2. What about past due? Statement usually shows current + past due. 
-    //    But for "Period View", usually just that period's bill.
-    //    However, user expects to see what they have to pay.
-    //    Let's stick to "Installments falling in this bucket".
-    //    Actually, better to match "PaymentSummary" logic?
-    //    PaymentSummary includes ALL past due. 
-    //    But "History" view usually separates months.
-    //    If I toggle to Feb, I want to see Feb's bill.
-    //    So strictly filter by due_date match? 
-    //    Or due_date <= payDate AND due_date > prevPayDate?
-    //    Since our generator makes exact due_dates, exact match is safest for "This Month's Portion".
-
-    //    Wait, getPaymentSummary shows ALL past due. 
-    //    If I go to Jan view, I should see Jan bill.
-    //    If I go to Feb view, I should see Feb bill.
-    //    If I didn't pay Jan, does Feb view show Jan + Feb? 
-    //    Standard bank app: Statement Jan shows Jan items. Statement Feb shows Feb items + "Previous Balance".
-    //    For simplicity, let's show items DUE in this period.
-
-    //    Constraint: Our due_dates are ISO strings. We should match DATE part.
-
     return await db.getAllAsync(`
         SELECT 
             i.id,
             p.id as purchase_id,
             p.notes,
-            i.due_date as date, -- Show due date as the "effective" date for the statement
+            i.due_date as date, 
             i.amount,
+            p.amount as original_amount,
             IFNULL(pe.name, 'Yo') as person_name,
             i.installment_number as installments_current,
             p.installments_total,
@@ -791,7 +801,7 @@ export async function getStatementItems(cardId: number, cutOffDateIso: string) {
         JOIN purchases p ON i.purchase_id = p.id
         LEFT JOIN people pe ON p.person_id = pe.id
         WHERE p.card_id = ?
-        AND date(i.due_date) = date(?) -- Exact match for this period
+        AND date(i.due_date) = date(?)
         ORDER BY i.due_date DESC
     `, [cardId, payDate.toISOString()]);
 }
@@ -816,7 +826,7 @@ export async function updateCard(
     await db.runAsync(
         `UPDATE cards 
          SET name = ?, bank = ?, credit_limit = ?, cut_day = ?, pay_day = ?, interest_rate_ea = ?, last_four_digits = ?, expiry_date = ?, card_type = ?
-         WHERE id = ?`,
+        WHERE id = ? `,
         [name, bank, creditLimit, cutDay, payDay, interestRateEA, lastFourDigits, expiryDate, cardType, cardId]
     );
 
@@ -879,7 +889,7 @@ export async function updatePurchaseWithInstallments(
         UPDATE purchases 
         SET amount = ?, total_with_interest = ?, notes = ?, installments_total = ?, interest_rate_ea = ?, person_id = ?, date = ?
         WHERE id = ?
-     `, [totalAmount, totalWithInterest, notes, totalInstallments, card.interest_rate_ea, personId, originalDateIso, purchaseId]);
+            `, [totalAmount, totalWithInterest, notes, totalInstallments, card.interest_rate_ea, personId, originalDateIso, purchaseId]);
 
     // 4. Regenerate Installments
     // Delete old
@@ -917,8 +927,8 @@ export async function updatePurchaseWithInstallments(
 
         await db.runAsync(
             `INSERT INTO installments
-            (purchase_id, installment_number, amount, capital, interest, due_date)
-            VALUES (?, ?, ?, ?, ?, ?)`,
+        (purchase_id, installment_number, amount, capital, interest, due_date)
+    VALUES(?, ?, ?, ?, ?, ?)`,
             [purchaseId, i + 1, totalInstallmentAmount, capitalPerInstallment, interestAmount, installmentDate.toISOString()]
         );
         currentBalance -= capitalPerInstallment;
@@ -953,4 +963,43 @@ export async function updatePurchaseWithInstallments(
         }));
         saveInstallmentsBatchToFirestore(user.uid, firestoreInstallments);
     }
+}
+
+export async function getActiveParticipants(cardId: number, dateIso: string): Promise<number[]> {
+    const db = getDb();
+    const card = await db.getFirstAsync<{ cut_day: number }>('SELECT cut_day FROM cards WHERE id = ?', [cardId]);
+    if (!card) return [];
+
+    const targetDate = new Date(dateIso);
+
+    // Calculate Period Start and End for this specific date
+    let startYear = targetDate.getFullYear();
+    let startMonth = targetDate.getMonth();
+
+    if (targetDate.getDate() <= card.cut_day) {
+        startMonth--; // Go back one month
+    }
+
+    const pStartMonth = startMonth;
+    const pStartYear = startYear;
+
+    // Period Start: Cut Day of previous month (relative to target period)
+    const pStartDate = getSafeDate(pStartYear, pStartMonth, card.cut_day);
+
+    // Period End: Cut Day of current month
+    const pEndMonth = pStartMonth + 1;
+    const pEndDate = getSafeDate(pStartYear, pEndMonth, card.cut_day);
+
+    // Query
+    const result = await db.getAllAsync<{ person_id: number }>(
+        `SELECT DISTINCT person_id 
+         FROM purchases 
+         WHERE card_id = ? 
+         AND date > ? 
+         AND date <= ?
+         AND person_id IS NOT NULL`,
+        [cardId, pStartDate.toISOString(), pEndDate.toISOString()]
+    );
+
+    return result.map(r => r.person_id);
 }

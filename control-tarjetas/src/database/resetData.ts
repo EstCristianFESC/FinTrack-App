@@ -1,81 +1,94 @@
 // Function to reset all data (for Settings reset option)
 
-import { getDb } from './dbCore';
+import { getDb, deleteDatabaseFile, initDatabase } from './dbCore';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import * as Updates from 'expo-updates';
+import { Alert } from 'react-native';
+import { auth } from '../firebase/firebaseConfig';
 
 
 export async function resetAllData(): Promise<void> {
-    const db = await getDb();
-
-    await db.execAsync(`DELETE FROM transactions`);
-    await db.execAsync(`DELETE FROM installments`);
-    await db.execAsync(`DELETE FROM cards`);
-    await db.execAsync(`DELETE FROM user_profile`);
+    // Legacy support, redirects to hard reset
+    await hardResetApp('legacy');
 }
 
-export async function deleteAllUserData(userId: string): Promise<void> {
-    const db = await getDb();
-    console.log('[RESET] Starting deletion for user:', userId);
+
+/**
+ * Hard Reset: Wipes ALL data from ALL tables locally and attempts to wipe cloud data for current user.
+ * This is the "Nuclear Option" to ensure no residual data remains.
+ */
+export async function hardResetApp(userId: string): Promise<void> {
+    console.log('[HARD RESET] Starting aggressive data wipe for user:', userId);
 
     try {
-        await db.withTransactionAsync(async () => {
-            // 1. Get Card IDs for this user to filter other tables
-            const cards = await db.getAllAsync<{ id: number }>('SELECT id FROM cards WHERE user_id = ?', [userId]);
-            const cardIds = cards.map(c => c.id);
-
-            if (cardIds.length > 0) {
-                const placeholders = cardIds.map(() => '?').join(',');
-
-                // 2. Get Purchase IDs
-                const purchases = await db.getAllAsync<{ id: number }>(`SELECT id FROM purchases WHERE card_id IN (${placeholders})`, cardIds);
-                const purchaseIds = purchases.map(p => p.id);
-
-                if (purchaseIds.length > 0) {
-                    const purchPlaceholders = purchaseIds.map(() => '?').join(',');
-                    // 3. Delete Installments
-                    console.log('[RESET] Deleting installments...');
-                    await db.runAsync(`DELETE FROM installments WHERE purchase_id IN (${purchPlaceholders})`, purchaseIds);
-                }
-
-                // 4. Delete Purchases
-                console.log('[RESET] Deleting purchases...');
-                await db.runAsync(`DELETE FROM purchases WHERE card_id IN (${placeholders})`, cardIds);
-
-                // 5. Delete Period Status
-                console.log('[RESET] Deleting period_status...');
-                await db.runAsync(`DELETE FROM period_status WHERE card_id IN (${placeholders})`, cardIds);
-            }
-
-            // 6. Delete Cards
-            console.log('[RESET] Deleting cards...');
-            await db.runAsync('DELETE FROM cards WHERE user_id = ?', [userId]);
-
-            // Note: We deliberately do NOT delete user_profile or people table generally, 
-            // but if desired, we can. The prompt said "Perfil conservado".
-            // People table is shared? Or should we delete people linked to this user's purchases?
-            // People doesn't have user_id column in schema (dbCore line 49). 
-            // So we leave people for now.
-        });
-
-        // 7. Delete from Cloud (Firestore)
-        console.log('[RESET] Deleting from Cloud...');
+        // 1. Wipe Cloud Data First (Best effort)
+        console.log('[HARD RESET] Wiping Cloud Data...');
         try {
             const { deleteAllFirestoreData } = await import('../firebase/sync');
-            await deleteAllFirestoreData(userId);
-            console.log('[RESET] Cloud wipe complete.');
+            if (userId !== 'legacy') {
+                await deleteAllFirestoreData(userId);
+            }
+            console.log('[HARD RESET] Cloud wipe complete.');
         } catch (e) {
-            console.error('[RESET] Cloud wipe failed:', e);
-            // We swallow this error? No, if cloud wipe fails, we should tell user.
-            throw new Error('Cloud wipe failed: ' + e);
+            console.error('[HARD RESET] Cloud wipe failed (continuing to local wipe):', e);
         }
 
-        // 8. Reset "Restored" flag so next launch checks fresh
-        const AsyncStorage = require('@react-native-async-storage/async-storage').default;
-        await AsyncStorage.removeItem('has_restored_data');
-        console.log('[RESET] Restore flag cleared.');
+        // 2. Wipe Local Data (Logical Deletion Only - Safe & Clean)
+        console.log('[HARD RESET] Clearing local DB tables...');
+        try {
+            // Init safely to ensure connection is open
+            try {
+                await initDatabase();
+            } catch (ignore) { /* already open */ }
 
-        console.log('[RESET] Data reset successfully (Local + Cloud).');
+            const db = getDb();
+
+            // Execute in order to respect FK constraints if possible, though SQLite usually handles DELETE without cascade unless configured.
+            // Disable foreign keys temporarily if needed, but simple delete usually works.
+            await db.runAsync('DELETE FROM installments');
+            await db.runAsync('DELETE FROM purchases');
+            await db.runAsync('DELETE FROM period_status');
+            await db.runAsync('DELETE FROM cards');
+            await db.runAsync('DELETE FROM people');
+            await db.runAsync('DELETE FROM user_profile');
+
+            console.log('[HARD RESET] Local tables cleared successfully.');
+        } catch (e) {
+            console.error('[HARD RESET] Failed to clear local tables:', e);
+            throw e; // Critical failure
+        }
+
+        // 3. Clear AsyncStorage flags
+        await AsyncStorage.removeItem('has_restored_data');
+        await AsyncStorage.removeItem('user_session');
+        console.log('[HARD RESET] Storage flags cleared.');
+
+        // 4. Sign Out from Firebase
+        try {
+            console.log('[HARD RESET] Signing out...');
+            await auth.signOut();
+            console.log('[HARD RESET] Signed out.');
+        } catch (e) {
+            console.error('[HARD RESET] Error signing out (ignoring):', e);
+        }
+
+        console.log('[HARD RESET] Completed successfully. Reloading app...');
+        try {
+            await Updates.reloadAsync();
+        } catch (e) {
+            console.error('Error reloading app:', e);
+            // Fallback if reload fails (e.g. in Expo Go dev client)
+            Alert.alert(
+                "Reinicio Necesario",
+                "Se han borrado los datos correctamente. Por favor cierra y abre la aplicación para aplicar los cambios y evitar errores.",
+                [{ text: "OK" }]
+            );
+        }
+
     } catch (error) {
-        console.error('[RESET] Error deleting data:', error);
+        console.error('[HARD RESET] Critical error during wipe:', error);
         throw error;
     }
 }
+
+export const deleteAllUserData = hardResetApp;

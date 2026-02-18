@@ -42,8 +42,10 @@ export default function SummaryDetailModal({ visible, onClose, type, cards }: Su
                         try {
                             const summary = await getPaymentSummaryDetails(card.id, new Date(card.nextCutOffDate).toISOString());
 
-                            // Merge into people map
-                            summary.byPerson.forEach((p: any) => {
+                            // Merge into people map (Combine OneShot + Installments)
+                            const allItems = [...(summary.oneShot || []), ...(summary.installments || [])];
+
+                            allItems.forEach((p: any) => {
                                 if (!allPeopleMap[p.personName]) {
                                     allPeopleMap[p.personName] = { name: p.personName, total: 0, items: [] };
                                 }

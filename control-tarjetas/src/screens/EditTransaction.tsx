@@ -75,6 +75,25 @@ export default function EditTransaction({ transactionId, cardId, onBack }: EditT
 
             setSelectedPersonId(tx.person_id);
         }
+        if (tx) {
+            setAmount(formatNumberInput(tx.amount.toString()));
+            setOriginalAmount(tx.amount); // Keep reference to calculate delta
+            setNotes(tx.notes);
+            setInstallments(tx.installments_total.toString());
+
+            // Set date object
+            if (tx.date) {
+                setDate(new Date(tx.date));
+            } else {
+                setDate(new Date());
+            }
+
+            setSelectedPersonId(tx.person_id);
+        } else {
+            Alert.alert('Error', 'No se encontró la información del gasto original.');
+            onBack();
+            return;
+        }
         setLoading(false);
     };
 

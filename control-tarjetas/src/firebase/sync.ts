@@ -5,63 +5,8 @@ import { getDb } from '../database/dbCore';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
 // --- Interfaces ---
+import { FirestoreCard, FirestorePurchase, FirestoreInstallment, FirestorePerson, FirestoreUserProfile } from '../types';
 
-export interface FirestoreCard {
-    id: number;
-    name: string;
-    bank: string;
-    credit_limit: number;
-    cut_day: number;
-    pay_day: number;
-    interest_rate_ea: number;
-    last_four_digits: string;
-    expiry_date: string;
-    card_type: string;
-    updated_at: string;
-}
-
-export interface FirestorePurchase {
-    id: number;
-    card_id: number;
-    person_id: number | null;
-    amount: number;
-    total_with_interest: number;
-    date: string;
-    notes: string;
-    is_installments: number;
-    installments_total: number;
-    interest_rate_ea: number;
-    updated_at: string;
-}
-
-export interface FirestoreInstallment {
-    id: number;
-    purchase_id: number;
-    installment_number: number;
-    amount: number;
-    capital: number;
-    interest: number;
-    due_date: string;
-    paid: number;
-    updated_at: string;
-}
-
-export interface FirestorePerson {
-    id: number;
-    name: string;
-    updated_at: string;
-}
-
-export interface FirestoreUserProfile {
-    id: number;
-    firebase_uid: string;
-    display_name?: string;
-    email?: string;
-    phone?: string;
-    photo_url?: string;
-    created_at?: string;
-    updated_at?: string;
-}
 
 // --- Save Functions ---
 
@@ -72,7 +17,6 @@ export async function saveCardToFirestore(userId: string, card: FirestoreCard) {
             ...card,
             updated_at: new Date().toISOString()
         });
-        console.log('✅ Card synced to Firestore');
     } catch (e) {
         console.error('❌ Error syncing card:', e);
     }
@@ -85,7 +29,6 @@ export async function savePurchaseToFirestore(userId: string, purchase: Firestor
             ...purchase,
             updated_at: new Date().toISOString()
         });
-        console.log('✅ Purchase synced to Firestore');
     } catch (e) {
         console.error('❌ Error syncing purchase:', e);
     }
@@ -122,7 +65,6 @@ export async function saveUserProfileToFirestore(userId: string, profile: Firest
             ...profile,
             updated_at: new Date().toISOString()
         });
-        console.log('✅ User Profile synced to Firestore');
     } catch (e) {
         console.error('❌ Error syncing user profile:', e);
     }
@@ -141,7 +83,6 @@ export async function saveInstallmentsBatchToFirestore(userId: string, installme
             });
         });
         await batch.commit();
-        console.log(`✅ Synced ${installments.length} installments to Firestore`);
     } catch (e) {
         console.error('❌ Error batch syncing installments:', e);
     }
@@ -171,7 +112,6 @@ export async function deleteCardFromFirestore(userId: string, cardId: number) {
         }
 
         await batch.commit();
-        console.log('✅ Card and related data deleted from Firestore');
     } catch (e) {
         console.error('❌ Error deleting card from Firestore:', e);
     }
@@ -190,7 +130,6 @@ export async function deletePurchaseFromFirestore(userId: string, purchaseId: nu
         instSnap.docs.forEach(d => batch.delete(d.ref));
 
         await batch.commit();
-        console.log('✅ Purchase and installments deleted from Firestore');
     } catch (e) {
         console.error('❌ Error deleting purchase from Firestore:', e);
     }
@@ -322,7 +261,17 @@ export async function restoreUserData(userId: string) {
 
 // --- Sync Down (Two-Way Sync) ---
 
+
+let isSyncing = false;
+
+// --- Sync Down (Two-Way Sync) ---
+
 export async function syncDown(userId: string) {
+    if (isSyncing) {
+        console.log('⚠️ Sync already in progress, skipping...');
+        return;
+    }
+    isSyncing = true;
     console.log('🔄 Starting Sync Down...');
     const localDb = getDb();
 
@@ -392,7 +341,7 @@ export async function syncDown(userId: string) {
             }
         });
 
-        console.log('✅ Sync Down Complete!');
+        console.log(`✅ Sync Down Complete! (Cards: ${cardsSnap.size}, Purchases: ${purchasesSnap.size}, Installments: ${installmentsSnap.size})`);
         // Update local restore flag just in case
         await AsyncStorage.setItem('has_restored_data', 'true');
 
@@ -403,6 +352,8 @@ export async function syncDown(userId: string) {
             console.error('❌ Error Syncing Down:', e);
         }
         // Don't block app usage on error
+    } finally {
+        isSyncing = false;
     }
 }
 
@@ -413,83 +364,93 @@ export async function syncUp(userId: string) {
     const localDb = getDb();
 
     try {
-        const batch = writeBatch(db);
-        let opCount = 0;
-
-        // Helper to commit batch if full (Firestore limit is 500)
-        const checkBatch = async () => {
-            if (opCount >= 450) {
-                await batch.commit();
-                opCount = 0;
-                // Re-instantiate batch? No, writeBatch() returns a new batch instance? 
-                // Actually writeBatch() returns a WriteBatch object. We can't reuse it after commit.
-                // So we need a mechanism to create a new one.
-                // For simplicity, let's assume we won't hit 500 in this simple app often, 
-                // OR we just rely on one big batch for now or split logically.
-                // Better approach: Just do it in blocks if needed, but for now let's hope < 500.
-                // TODO: Implement chunking if user has massive data.
-            }
-        };
+        // Collect all writes first to manage batches effectively
+        const pendingWrites: { ref: any, data: any }[] = [];
 
         // 1. Profile
         const profile = await localDb.getFirstAsync<FirestoreUserProfile>('SELECT * FROM user_profile WHERE firebase_uid = ?', [userId]);
         if (profile) {
-            const ref = doc(db, `users/${userId}/profile/main`);
-            batch.set(ref, {
-                ...profile,
-                // Ensure valid dates
-                updated_at: new Date().toISOString()
+            pendingWrites.push({
+                ref: doc(db, `users/${userId}/profile/main`),
+                data: { ...profile, updated_at: new Date().toISOString() }
             });
-            opCount++;
         }
 
-        // 2. People (All people are shared? No, they don't have user_id. We'll just push all)
+        // 2. People
         const people = await localDb.getAllAsync<FirestorePerson>('SELECT * FROM people');
-        for (const p of people) {
-            const ref = doc(db, `users/${userId}/people/${p.id}`);
-            batch.set(ref, p);
-            opCount++;
-        }
+        people.forEach(p => {
+            pendingWrites.push({
+                ref: doc(db, `users/${userId}/people/${p.id}`),
+                data: p
+            });
+        });
 
         // 3. Cards
         const cards = await localDb.getAllAsync<FirestoreCard>('SELECT * FROM cards WHERE user_id = ?', [userId]);
-        for (const c of cards) {
-            const ref = doc(db, `users/${userId}/cards/${c.id}`);
-            batch.set(ref, { ...c, updated_at: new Date().toISOString() });
-            opCount++;
-        }
+        cards.forEach(c => {
+            pendingWrites.push({
+                ref: doc(db, `users/${userId}/cards/${c.id}`),
+                data: { ...c, updated_at: new Date().toISOString() }
+            });
+        });
 
-        // 4. Purchases
-        // Need to filter purchases by cards belonging to user
+        // 4. Purchases & Installments
         if (cards.length > 0) {
             const cardIds = cards.map(c => c.id).join(',');
             const purchases = await localDb.getAllAsync<FirestorePurchase>(`SELECT * FROM purchases WHERE card_id IN (${cardIds})`);
 
-            for (const p of purchases) {
-                const ref = doc(db, `users/${userId}/purchases/${p.id}`);
-                batch.set(ref, { ...p, updated_at: new Date().toISOString() });
-                opCount++;
-            }
+            purchases.forEach(p => {
+                pendingWrites.push({
+                    ref: doc(db, `users/${userId}/purchases/${p.id}`),
+                    data: { ...p, updated_at: new Date().toISOString() }
+                });
+            });
 
             // 5. Installments
             if (purchases.length > 0) {
                 const purchaseIds = purchases.map(p => p.id).join(',');
-                // This query might be too long if many purchases, but for local SQLite it handles it reasonably.
+                // If purchaseIds string is too long (SQLite limit is usually 1MB query size, should be fine for typical usage)
+                // but just in case, we could split. For now, assuming reasonable size.
                 const installments = await localDb.getAllAsync<FirestoreInstallment>(`SELECT * FROM installments WHERE purchase_id IN (${purchaseIds})`);
 
-                for (const i of installments) {
-                    const ref = doc(db, `users/${userId}/installments/${i.id}`);
-                    batch.set(ref, { ...i, updated_at: new Date().toISOString() });
-                    opCount++;
-                }
+                installments.forEach(i => {
+                    pendingWrites.push({
+                        ref: doc(db, `users/${userId}/installments/${i.id}`),
+                        data: { ...i, updated_at: new Date().toISOString() }
+                    });
+                });
             }
         }
 
-        if (opCount > 0) {
+        // Execute Batches
+        const BATCH_SIZE = 450;
+        let batch = writeBatch(db);
+        let count = 0;
+        let totalSynced = 0;
+
+        for (const write of pendingWrites) {
+            batch.set(write.ref, write.data);
+            count++;
+
+            if (count >= BATCH_SIZE) {
+                await batch.commit();
+                console.log(`📦 Committed batch of ${count} records...`);
+                batch = writeBatch(db); // Create new batch
+                count = 0;
+            }
+            totalSynced++;
+        }
+
+        // Commit remaining
+        if (count > 0) {
             await batch.commit();
-            console.log(`✅ Backup Complete! (${opCount} records synced)`);
-        } else {
+            console.log(`📦 Committed final batch of ${count} records.`);
+        }
+
+        if (totalSynced === 0) {
             console.log('⚠️ Nothing to sync up.');
+        } else {
+            console.log(`✅ Backup Complete! (${totalSynced} records synced)`);
         }
 
     } catch (e) {

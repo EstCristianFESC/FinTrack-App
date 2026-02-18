@@ -27,6 +27,8 @@ export default function CardDetail({ cardId, onBack, onNavigate }: CardDetailPro
     const [selectedPeriod, setSelectedPeriod] = useState<any>(null);
     const [showPeriodSelector, setShowPeriodSelector] = useState(false);
 
+    const [periodTotal, setPeriodTotal] = useState(0);
+
     const loadData = async () => {
         setLoading(true);
         try {
@@ -45,16 +47,26 @@ export default function CardDetail({ cardId, onBack, onNavigate }: CardDetailPro
                 setSelectedPeriod(currentPeriod);
             }
 
-            let txs;
+            let txs = [];
+            let totalToPay = 0;
+
             if (currentPeriod) {
-                // Use new Statement Logic
-                txs = await getStatementItems(cardId, currentPeriod.endDate);
+                // 1. Historial: Muestra las COMPRAS hechas en este periodo
+                txs = await getTransactionsByPeriod(cardId, currentPeriod.startDate, currentPeriod.endDate);
+
+                // 2. Total a Pagar: Suma las CUOTAS que vencen en este periodo
+                const statementItems = await getStatementItems(cardId, currentPeriod.endDate);
+                totalToPay = statementItems.reduce((acc: number, item: any) => acc + item.amount, 0);
+
             } else {
-                // Fallback to all purchases if no periods (e.g. newly created card)
+                // Fallback
                 txs = await getTransactionsByCard(cardId);
+                // In fallback mode, maybe just sum the txs? Or 0. Let's sum txs assuming cash view.
+                totalToPay = txs.reduce((acc: number, item: any) => acc + item.amount, 0);
             }
 
             setTransactions(txs);
+            setPeriodTotal(totalToPay);
 
             if (sum && currentPeriod) {
                 // Check status based on the selected period's cutoff
@@ -71,23 +83,24 @@ export default function CardDetail({ cardId, onBack, onNavigate }: CardDetailPro
         }
     };
 
-    // Reload when period changes (but not on initial load to avoid double fetch if handled above)
-    // Actually, distinct useEffect for cardId vs selectedPeriod is tricky if they depend on each other.
-    // Let's keep one main loadData and call it.
-
     useEffect(() => {
         loadData();
     }, [cardId]);
 
-    // When selectedPeriod changes, we just refetch transactions to be snappy
+    // When selectedPeriod changes
     const handlePeriodChange = async (period: any) => {
         setSelectedPeriod(period);
         setShowPeriodSelector(false);
         setLoading(true);
         try {
-            // Use new Statement Logic
-            const txs = await getStatementItems(cardId, period.endDate);
+            // 1. Historial: Compras del periodo
+            const txs = await getTransactionsByPeriod(cardId, period.startDate, period.endDate);
             setTransactions(txs);
+
+            // 2. Total: Cuotas del periodo
+            const statementItems = await getStatementItems(cardId, period.endDate);
+            const totalToPay = statementItems.reduce((acc: number, item: any) => acc + item.amount, 0);
+            setPeriodTotal(totalToPay);
 
             // Update period status too
             const status = await getPeriodStatus(cardId, period.endDate);
@@ -147,15 +160,17 @@ export default function CardDetail({ cardId, onBack, onNavigate }: CardDetailPro
     };
 
     const handleRevertPayment = async () => {
+        const cutOffToPay = selectedPeriod ? selectedPeriod.endDate : (summary ? summary.nextCutOffDate : null);
+        if (!cutOffToPay) return;
+
         showModal(
             'Deshacer Pago',
             '¿Deseas revertir el pago de este corte? Los movimientos volverán a estar pendientes.',
             'confirmation',
             async () => {
                 try {
-                    await unmarkPeriodAsPaid(cardId, summary.nextCutOffDate);
+                    await unmarkPeriodAsPaid(cardId, typeof cutOffToPay === 'string' ? cutOffToPay : cutOffToPay.toISOString());
                     setModalVisible(false);
-                    // showModal('Pago Revertido', 'El estado de cuenta ha sido restaurado.', 'success'); // Optional, or just reload
                     loadData();
                 } catch (e) {
                     setModalVisible(false);
@@ -167,6 +182,27 @@ export default function CardDetail({ cardId, onBack, onNavigate }: CardDetailPro
         );
     };
 
+    // Calculate dynamic values
+    let displayPayDate = new Date();
+    // Use summary if available, otherwise default to now (will be handled by loading check anyway)
+    if (summary) {
+        displayPayDate = new Date(summary.nextPayDate);
+    }
+
+    if (selectedPeriod && summary) {
+        const cutOff = new Date(selectedPeriod.endDate);
+        const payDay = summary.pay_day;
+        const cutDay = summary.cut_day;
+        let calculatedPayDate = getSafeDate(cutOff.getFullYear(), cutOff.getMonth(), payDay);
+        if (payDay < cutDay) {
+            calculatedPayDate = getSafeDate(cutOff.getFullYear(), cutOff.getMonth() + 1, payDay);
+        }
+        displayPayDate = calculatedPayDate;
+    }
+
+    // Use separate total, NOT from transactions list
+    const displayTotal = periodStatus.isPaid ? 0 : periodTotal;
+
     if (loading && !summary) {
         return (
             <View style={[styles.container, { backgroundColor: colors.background }]}>
@@ -174,6 +210,7 @@ export default function CardDetail({ cardId, onBack, onNavigate }: CardDetailPro
             </View>
         );
     }
+
 
     return (
         <View style={[styles.container, { backgroundColor: colors.background }]}>
@@ -205,69 +242,62 @@ export default function CardDetail({ cardId, onBack, onNavigate }: CardDetailPro
                     style={[styles.summaryCard, { borderColor: colors.border }]}
                 >
                     {/* Calculate dynamic values for the Selected Period */}
-                    {(() => {
-                        // 1. Determine Date to Display
-                        let displayPayDate = new Date(summary.nextPayDate); // Default to current
-
-                        if (selectedPeriod) {
-                            const cutOff = new Date(selectedPeriod.endDate);
-                            const payDay = summary.pay_day;
-                            const cutDay = summary.cut_day;
-
-                            // Calculate Pay Date relative to this Cut-Off
-                            // Same logic as database.ts
-                            let calculatedPayDate = getSafeDate(cutOff.getFullYear(), cutOff.getMonth(), payDay);
-                            if (payDay < cutDay) {
-                                // If pay day is before cut day, it's next month relative to cut off MONTH
-                                // usage of getSafeDate handles month overflow
-                                calculatedPayDate = getSafeDate(cutOff.getFullYear(), cutOff.getMonth() + 1, payDay);
-                            }
-                            displayPayDate = calculatedPayDate;
-                        }
-
-                        // 2. Determine Amount
-                        // If we are in "Statement Mode" (transactions contains statement items),
-                        // The total to pay is the sum of these items.
-                        const totalForPeriod = transactions.reduce((sum, item) => sum + item.amount, 0);
-
-                        return (
-                            <View style={styles.row}>
-                                <View>
-                                    <Text style={[styles.label, { color: colors.textMuted }]}>
-                                        TOTAL A PAGAR <Text style={{ fontWeight: '400' }}>({selectedPeriod ? selectedPeriod.label : 'Actual'})</Text>
+                    <View style={styles.row}>
+                        <View>
+                            <Text style={[styles.label, { color: colors.textMuted }]}>
+                                TOTAL A PAGAR <Text style={{ fontWeight: '400' }}>({selectedPeriod ? selectedPeriod.label : 'Actual'})</Text>
+                            </Text>
+                            <View style={{ flexDirection: 'column', gap: 2 }}>
+                                <Text style={[styles.bigValue, { color: !periodStatus.isPaid && periodTotal > 0 ? tokens.error : colors.text }]}>
+                                    {formatCurrency(displayTotal)}
+                                </Text>
+                                {periodStatus.isPaid && (
+                                    <Text style={{ color: colors.success, fontWeight: '600', fontSize: 14 }}>
+                                        Pagado: {formatCurrency(periodTotal)}
                                     </Text>
-                                    <View style={{ flexDirection: 'row', alignItems: 'baseline', gap: 8 }}>
-                                        <Text style={[styles.bigValue, { color: !periodStatus.isPaid && totalForPeriod > 0 ? tokens.error : colors.text }]}>
-                                            {formatCurrency(totalForPeriod)}
-                                        </Text>
-                                    </View>
-                                    <Text style={[styles.label, { color: colors.warning, fontSize: 13, marginTop: -4, marginBottom: 8 }]}>
-                                        Fecha Límite: {formatDate(displayPayDate)}
-                                    </Text>
-
-                                    <View style={{ flexDirection: 'row', gap: 10, marginTop: 4 }}>
-                                        {!periodStatus.isPaid && totalForPeriod > 0 && (
-                                            <TouchableOpacity onPress={handlePayCutOff} style={[styles.payButton, { backgroundColor: colors.success }]}>
-                                                <Text style={[styles.payButtonText, { color: '#003300' }]}>Pagar Corte</Text>
-                                            </TouchableOpacity>
-                                        )}
-
-                                        {periodStatus.isPaid && (
-                                            <TouchableOpacity onPress={handleRevertPayment} style={[styles.payButton, { backgroundColor: 'transparent', borderWidth: 1, borderColor: colors.error }]}>
-                                                <Text style={[styles.payButtonText, { color: colors.error }]}>Deshacer Pago</Text>
-                                            </TouchableOpacity>
-                                        )}
-
-                                        {periodStatus.isPaid && (
-                                            <View style={[styles.payButton, { backgroundColor: colors.success + '20', borderWidth: 0 }]}>
-                                                <Text style={[styles.payButtonText, { color: colors.success }]}>Pagado ✓</Text>
-                                            </View>
-                                        )}
-                                    </View>
-                                </View>
+                                )}
                             </View>
-                        );
-                    })()}
+                            <Text style={[styles.label, { color: colors.warning, fontSize: 13, marginTop: 4 }]}>
+                                Fecha Límite: {formatDate(displayPayDate)}
+                            </Text>
+                        </View>
+                    </View>
+
+                    <View style={{ flexDirection: 'row', gap: 10, marginTop: 16, justifyContent: 'flex-start' }}>
+                        {!periodStatus.isPaid && periodTotal > 0 && (
+                            <TouchableOpacity onPress={handlePayCutOff} style={[styles.payButton, { backgroundColor: colors.success }]}>
+                                <Text style={[styles.payButtonText, { color: '#003300' }]}>Pagar Corte</Text>
+                            </TouchableOpacity>
+                        )}
+
+                        {periodStatus.isPaid && (
+                            <>
+                                <TouchableOpacity
+                                    onPress={() => onNavigate('PaymentSummary', {
+                                        cardId,
+                                        cutOffDate: typeof (selectedPeriod ? selectedPeriod.endDate : (summary ? summary.nextCutOffDate : null)) === 'string'
+                                            ? (selectedPeriod ? selectedPeriod.endDate : summary.nextCutOffDate)
+                                            : (selectedPeriod ? selectedPeriod.endDate : summary.nextCutOffDate).toISOString(),
+                                        readonly: true
+                                    })}
+                                    style={[
+                                        styles.payButton,
+                                        {
+                                            backgroundColor: theme === 'dark' ? 'rgba(255,255,255,0.2)' : 'rgba(0,0,0,0.05)',
+                                            borderWidth: 1,
+                                            borderColor: theme === 'dark' ? 'rgba(255,255,255,0.3)' : colors.border
+                                        }
+                                    ]}
+                                >
+                                    <Text style={[styles.payButtonText, { color: theme === 'dark' ? 'white' : colors.primary }]}>Ver Resumen</Text>
+                                </TouchableOpacity>
+
+                                <TouchableOpacity onPress={handleRevertPayment} style={[styles.payButton, { backgroundColor: 'transparent', borderWidth: 1, borderColor: colors.error }]}>
+                                    <Text style={[styles.payButtonText, { color: colors.error }]}>Deshacer Pago</Text>
+                                </TouchableOpacity>
+                            </>
+                        )}
+                    </View>
 
                     <View style={[styles.divider, { backgroundColor: colors.border }]} />
 
@@ -284,7 +314,8 @@ export default function CardDetail({ cardId, onBack, onNavigate }: CardDetailPro
                         </View>
                     </View>
                 </LinearGradient>
-            )}
+            )
+            }
 
             <View style={styles.historyHeader}>
                 <Text style={[styles.sectionTitle, { color: colors.text }]}>Movimientos</Text>
